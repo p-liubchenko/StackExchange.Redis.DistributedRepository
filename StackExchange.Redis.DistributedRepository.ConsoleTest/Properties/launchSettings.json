@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "StackExchange.Redis.DistributedRepository.ConsoleTest": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
