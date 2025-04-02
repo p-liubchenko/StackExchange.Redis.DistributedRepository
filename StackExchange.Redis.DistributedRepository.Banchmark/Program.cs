@@ -9,4 +9,5 @@ internal class Program
 		// run the benchmark
 		BenchmarkRunner.Run<RepositoryBenchmark>();
 	}
+
 }

@@ -1,4 +1,5 @@
 ﻿
+
 namespace StackExchange.Redis.DistributedRepository;
 
 /// <summary>
@@ -20,6 +21,8 @@ public interface IDistributedRepository<T> where T : class
 	/// <param name="item"></param>
 	/// <returns></returns>
 	Task<T> AddAsync(T item);
+	void AddRange(IEnumerable<T> range);
+	Task AddRangeAsync(IEnumerable<T> range);
 
 	/// <summary>
 	/// Gets all items from the repository
@@ -48,10 +51,33 @@ public interface IDistributedRepository<T> where T : class
 	Task<T?> GetAsync(string Key);
 
 	/// <summary>
+	/// Gets an item from the repository by key, or adds it if it doesn't exist
+	/// </summary>
+	/// <param name="key"></param>
+	/// <param name="factory"></param>
+	/// <returns></returns>
+	T GetOrAdd(string key, Func<T> factory);
+
+	/// <summary>
+	/// Gets an item from the repository by key, or adds it if it doesn't exist
+	/// </summary>
+	/// <param name="key"></param>
+	/// <param name="factory"></param>
+	/// <returns></returns>
+	Task<T> GetOrAddAsync(string key, Func<Task<T>> factory);
+
+	/// <summary>
 	/// Purges the repository
 	/// </summary>
 	/// <returns></returns>
 	Task Purge();
+	Task RebakeAll();
+
+	/// <summary>
+	/// Rebuilds the repository, syncing with distributed cache with in-memory, taking distributed data container as source of truth
+	/// </summary>
+	/// <returns></returns>
+	Task Rebuild();
 
 	/// <summary>
 	/// Removes an item from the repository by key
