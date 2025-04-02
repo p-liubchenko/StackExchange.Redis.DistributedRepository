@@ -7,7 +7,7 @@
 		<InternalsVisibleTo>StackExchange.Redis.DistributedRepository.Banchmark</InternalsVisibleTo>
 		<InternalsVisibleTo>StackExchange.Redis.DistributedRepository.Tests</InternalsVisibleTo>
 		<VersionPrefix>0.0.1.0</VersionPrefix>
-		<PackageId>Redis.DistributedRepository</PackageId>
+		<PackageId>PL.StackExchange.Redis.DistributedRepository</PackageId>
 		<Authors>p-liubchenko</Authors>
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 		<IncludeSymbols>true</IncludeSymbols>

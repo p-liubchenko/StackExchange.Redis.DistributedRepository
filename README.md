@@ -21,7 +21,7 @@ A lightweight, memory-optimized distributed repository built on top of [StackExc
 Install via NuGet:
 
 ```bash
-dotnet add package <YourPackageNameHere>
+dotnet add package PL.StackExchange.Redis.DistributedRepository
 
 ```
 ## 🧠 Usage
