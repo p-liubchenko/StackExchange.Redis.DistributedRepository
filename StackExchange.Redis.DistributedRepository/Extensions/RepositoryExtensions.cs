@@ -7,7 +7,7 @@ internal static class RepositoryExtensions
 	/// </summary>
 	/// <param name="key"></param>
 	/// <returns></returns>
-	public static string FQK<T>(this DistributedHashRepository<T> repo, string key) where T : class => 
+	public static string FQK<T>(this DistributedRepository<T> repo, string key) where T : class => 
 		$"{repo.BaseKey}:{key}";
 
 	/// <summary>
@@ -15,6 +15,6 @@ internal static class RepositoryExtensions
 	/// </summary>
 	/// <param name="item"></param>
 	/// <returns></returns>
-	private static string FQK<T>(this DistributedHashRepository<T> repo, T item) where T : class => 
+	private static string FQK<T>(this DistributedRepository<T> repo, T item) where T : class => 
 		$"{repo.BaseKey}:{repo.KeySelector.Invoke(item)}";
 }

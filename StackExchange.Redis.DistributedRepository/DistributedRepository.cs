@@ -1,17 +1,16 @@
-﻿using Microsoft.Extensions.Caching.Distributed;
+﻿using System.Runtime.CompilerServices;
+using System.Text.Json;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.Extensions.Core.Abstractions;
-using System.Runtime.CompilerServices;
-using System.Text;
-using System.Text.Json;
-using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
+using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache where T : class
+public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, IDistributedRepository<T> where T : class
 {
 	protected static string InstanceId = Guid.NewGuid().ToString();
 
@@ -32,6 +31,14 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 	}
 
 	/// <summary>
+	/// Base key in memory full list
+	/// </summary>
+	protected string MemoryListKey
+	{
+		get => $"{BaseKey}:list";
+	}
+
+	/// <summary>
 	/// Key selector for the repository's entity
 	/// </summary>
 	public readonly Func<T, string> KeySelector;
@@ -41,7 +48,7 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
 
-	public DistributedHashRepository(IRedisClient redis, IMemoryCache memoryCache, Func<T, string> keySelector)
+	public DistributedRepository(IRedisClient redis, IMemoryCache memoryCache, Func<T, string> keySelector)
 	{
 		_redisDatabase = redis.GetDefaultDatabase();
 		_database = _redisDatabase.Database;
@@ -52,30 +59,42 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
 
-	public T Add(T item)
-	{
-		string key = KeySelector.Invoke(item);
-		string fqk = this.FQK(key);
-		ITransaction? transaction = _database.CreateTransaction();
-		transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-		transaction.SetAddAsync(BaseKeyTracker, key);
-		transaction.Execute();
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
-		return item;
-	}
+	#region add
+	public T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
 	public async Task<T> AddAsync(T item)
 	{
 		string key = KeySelector.Invoke(item);
 		string fqk = this.FQK(key);
-		ITransaction? transaction = _database.CreateTransaction();
-		await transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-		await transaction.SetAddAsync(BaseKeyTracker, key);
-		await transaction.ExecuteAsync();
+		T result = await AddRedis(key, item);
+		MemoryAdd(item, fqk);
 		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
-		return item;
+		return result;
 	}
 
+	protected async Task<T> AddRedis(string key, T item)
+	{
+		ITransaction? transaction = _database.CreateTransaction();
+		transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+		transaction.SetAddAsync(BaseKeyTracker, key);
+		await transaction.ExecuteAsync();
+		return item;
+	}
+	protected void MemoryAdd(T item, string fqk)
+	{
+		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		if (items is null)
+		{
+			items = new List<T>();
+			_memoryCache.Set(MemoryListKey, items);
+		}
+		items.Add(item);
+		_memoryCache.Set(fqk, item);
+
+	}
+	#endregion
+
+	#region remove
 	public T? Remove(T item)
 	{
 		string? key = KeySelector.Invoke(item);
@@ -88,33 +107,36 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 		return await RemoveAsync(key);
 	}
 
-	public T? Remove(string key)
-	{
-		var poped = Get(key);
-		if (poped is null)
-			return null;
-		ITransaction transaction = _database.CreateTransaction();
-		transaction.HashDeleteAsync(BaseKey, key);
-		transaction.SetRemoveAsync(BaseKeyTracker, key);
-		transaction.Execute();
-		_memoryCache.Remove(this.FQK(key));
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
-		return poped;
-	}
+	public T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
 
 	public async Task<T?> RemoveAsync(string key)
 	{
 		var poped = await GetAsync(key);
 		if (poped is null)
 			return null;
+		await RemoveRedis(key);
+		RemoveMemory(key);
+		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		return poped;
+	}
+
+	protected async Task RemoveRedis(string key)
+	{
 		ITransaction transaction = _database.CreateTransaction();
 		transaction.HashDeleteAsync(BaseKey, key);
 		transaction.SetRemoveAsync(BaseKeyTracker, key);
 		await transaction.ExecuteAsync();
-		_memoryCache.Remove(this.FQK(key));
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
-		return poped;
 	}
+	protected void RemoveMemory(string key)
+	{
+		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		if (items is null)
+			return;
+		items.RemoveAll(x => KeySelector.Invoke(x) == key);
+
+		_memoryCache.Remove(this.FQK(key));
+	}
+	#endregion
 
 	public T? Get(string Key)
 	{
@@ -158,23 +180,55 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 
 	public async Task<IEnumerable<T>> GetAsync()
 	{
-		RedisValue[]? keys = _database.HashKeys(BaseKey);
-		List<T>? items = new List<T>();
-		foreach (var key in keys)
+		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		if (!fetchedFromMemory || items is null)
 		{
-			items.Add(await GetAsync(key));
+			HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
+
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+
+			_memoryCache.Set(
+				MemoryListKey,
+				values.Values.ToList()
+			);
+
+			foreach (KeyValuePair<string, T?> item in values)
+			{
+				if (item.Value is null)
+					continue;
+
+				_memoryCache.Set(this.FQK(item.Key), item.Value);
+			}
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
 		}
+
 		return items;
 	}
 
 	public IEnumerable<T> Get()
 	{
-		RedisValue[]? keys = _database.HashKeys(BaseKey);
-		List<T>? items = new List<T>();
-		foreach (var key in keys)
+		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		if (!fetchedFromMemory || items is null)
 		{
-			items.Add(Get(key));
+			HashEntry[]? objects = _database.HashGetAll(BaseKey);
+
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+
+			_memoryCache.Set(
+				MemoryListKey,
+				values.Values.ToList()
+			);
+
+			foreach (KeyValuePair<string, T?> item in values)
+			{
+				if (item.Value is null)
+					continue;
+
+				_memoryCache.Set(this.FQK(item.Key), item.Value);
+			}
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
 		}
+
 		return items;
 	}
 
@@ -194,8 +248,8 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 	public async Task Purge()
 	{
 		ITransaction transaction = _database.CreateTransaction();
-		await transaction.KeyDeleteAsync(BaseKey);
-		await transaction.KeyDeleteAsync(BaseKeyTracker);
+		transaction.KeyDeleteAsync(BaseKey);
+		transaction.KeyDeleteAsync(BaseKeyTracker);
 		await transaction.ExecuteAsync();
 		await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
 		await RebakeAll();
@@ -211,8 +265,8 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 
 		ITransaction? transaction = _database.CreateTransaction();
 
-		await transaction.SetRemoveAsync(BaseKeyTracker, toRemove.ToArray());
-		await transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
+		transaction.SetRemoveAsync(BaseKeyTracker, toRemove.ToArray());
+		transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
 		await transaction.ExecuteAsync();
 
 		_memoryCache.Set(
@@ -243,7 +297,7 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 					return;
 				T? item = Get(message.item);
 				if (item is null) return;
-				_memoryCache.Set(this.FQK(message.item), item);
+				MemoryAdd(item, this.FQK(message.item));
 				break;
 			case MessageType.Updated:
 				if (string.IsNullOrEmpty(message.item))
@@ -255,7 +309,7 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 			case MessageType.Deleted:
 				if (string.IsNullOrEmpty(message.item))
 					return;
-				_memoryCache.Remove(this.FQK(message.item));
+				RemoveMemory(message.item);
 				break;
 			case MessageType.Purged:
 				List<string>? keys = _memoryCache.Get<List<string>>(BaseKeyTracker);
@@ -276,7 +330,7 @@ public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache
 			? $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType}}}"
 			: $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
 	}
-	
+
 	#region IDistributedCache
 	byte[]? IDistributedCache.Get(string key)
 	{
