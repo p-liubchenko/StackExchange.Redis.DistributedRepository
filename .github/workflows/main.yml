@@ -5,47 +5,75 @@ on:
     branches:
       - master
       - dev
+      - 'feature/**'
+      - 'release/**'
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v1
+        uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      - name: Extract version from .csproj
-        id: get_version
+      - name: Extract VersionPrefix from .csproj
+        id: versioning
         run: |
-          VERSION=$(grep -oP '(?<=<Version>).*?(?=</Version>)' StackExchange.Redis.DistributedRepository/StackExchange.Redis.DistributedRepository.csproj)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          VERSION_PREFIX=$(grep -oP '(?<=<VersionPrefix>).*?(?=</VersionPrefix>)' StackExchange.Redis.DistributedRepository/StackExchange.Redis.DistributedRepository.csproj)
+          
+          echo "VERSION_PREFIX=$VERSION_PREFIX" >> $GITHUB_ENV
+          echo "VERSION_PREFIX=$VERSION_PREFIX"
 
-      - name: Check if version exists on NuGet
-        id: check_nuget
-        run: |
-          if curl --silent --fail --head "https://www.nuget.org/api/v2/package/YourPackageName/$VERSION"; then
-            echo "VERSION_EXISTS=true" >> $GITHUB_ENV
+          BRANCH="${GITHUB_REF##*/}"
+          if [[ "$GITHUB_REF" == "refs/heads/dev" ]]; then
+            VERSION_SUFFIX="dev.${{ github.run_number }}"
+          elif [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
+            VERSION_SUFFIX="rc.${{ github.run_number }}"
           else
-            echo "VERSION_EXISTS=false" >> $GITHUB_ENV
+            VERSION_SUFFIX=""
           fi
+
+          echo "VERSION_SUFFIX=$VERSION_SUFFIX" >> $GITHUB_ENV
+          echo "VERSION=$VERSION_PREFIX${VERSION_SUFFIX:+-$VERSION_SUFFIX}" >> $GITHUB_ENV
 
       - name: Restore dependencies
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build --configuration Release --no-restore /p:VersionPrefix=$VERSION_PREFIX /p:VersionSuffix=$VERSION_SUFFIX
 
       - name: Test
-        run: dotnet test --no-restore --verbosity normal
+        run: dotnet test --no-restore --no-build --verbosity normal
+
+      - name: Check if version exists on NuGet
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/')
+        id: check_nuget
+        run: |
+          VERSION_FULL="$VERSION_PREFIX${VERSION_SUFFIX:+-$VERSION_SUFFIX}"
+          if curl --silent --fail --head "https://www.nuget.org/api/v2/package/PL.StackExchange.Redis.DistributedRepository/$VERSION_FULL"; then
+            echo "VERSION_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "VERSION_EXISTS=false" >> $GITHUB_ENV
+          fi
 
       - name: Pack
-        if: env.VERSION_EXISTS == 'false'
-        run: dotnet pack --configuration Release --no-build --output nupkg
+        if: env.VERSION_EXISTS == 'false' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/'))
+        run: |
+          dotnet pack StackExchange.Redis.DistributedRepository/StackExchange.Redis.DistributedRepository.csproj \
+            --configuration Release \
+            --no-build \
+            --output nupkg \
+            /p:VersionPrefix=$VERSION_PREFIX /p:VersionSuffix=$VERSION_SUFFIX
 
       - name: Push to NuGet
-        if: env.VERSION_EXISTS == 'false'
-        run: dotnet nuget push nupkg/*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate
+        if: env.VERSION_EXISTS == 'false' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/release/'))
+        run: |
+          dotnet nuget push nupkg/*.nupkg \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --skip-duplicate
