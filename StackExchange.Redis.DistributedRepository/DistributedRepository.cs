@@ -72,6 +72,43 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return result;
 	}
 
+	public void AddRange(IEnumerable<T> range) => 
+		AddRangeAsync(range).GetAwaiter().GetResult();
+
+	public async Task AddRangeAsync(IEnumerable<T> range)
+	{
+		await RedisAddRange(range);
+		MemoryAddRange(range);
+	}
+
+	protected async Task RedisAddRange(IEnumerable<T> range)
+	{
+		ITransaction transaction = _database.CreateTransaction();
+		foreach (var item in range)
+		{
+			string key = KeySelector.Invoke(item);
+			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+			transaction.SetAddAsync(BaseKeyTracker, key);
+		}
+		await transaction.ExecuteAsync();
+	}
+
+	protected void MemoryAddRange(IEnumerable<T> range)
+	{
+		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		if (items is null)
+		{
+			items = new List<T>();
+			_memoryCache.Set(MemoryListKey, items);
+		}
+		items.AddRange(range);
+		foreach (var item in range)
+		{
+			string key = KeySelector.Invoke(item);
+			_memoryCache.Set(this.FQK(key), item);
+		}
+	}
+
 	protected async Task<T> AddRedis(string key, T item)
 	{
 		ITransaction? transaction = _database.CreateTransaction();
@@ -138,6 +175,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 	#endregion
 
+	/// <inheritdoc/>
 	public T? Get(string Key)
 	{
 		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
@@ -158,6 +196,18 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return null;
 	}
 
+	/// <inheritdoc/>
+	public T GetOrAdd(string key, Func<T> factory)
+	{
+		T? item = Get(key);
+		if (item is not null)
+			return item;
+		item = factory();
+		Add(item);
+		return item;
+	}
+
+	/// <inheritdoc/>
 	public async Task<T?> GetAsync(string Key)
 	{
 		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
@@ -178,6 +228,18 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return null;
 	}
 
+	/// <inheritdoc/>
+	public async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
+	{
+		T? item = await GetAsync(key);
+		if (item is not null)
+			return item;
+		item = await factory();
+		await AddAsync(item);
+		return item;
+	}
+
+	/// <inheritdoc/>
 	public async Task<IEnumerable<T>> GetAsync()
 	{
 		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
@@ -205,6 +267,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return items;
 	}
 
+	/// <inheritdoc/>
 	public IEnumerable<T> Get()
 	{
 		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
@@ -232,19 +295,18 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return items;
 	}
 
-	protected async Task RebakeAll()
+	/// <inheritdoc/>
+	public async Task RebakeAll()
 	{
 		RedisValue[]? keys = _database.SetMembers(BaseKeyTracker);
-		_memoryCache.Set(
-			BaseKeyTracker,
-			keys.Where(x => x.HasValue).Select(x => x.ToString())
-		);
+
 		foreach (var item in keys)
 		{
-			_memoryCache.Set(this.FQK(item.ToString()), Get(item));
+			MemoryAdd(await GetAsync(item), this.FQK(item.ToString()));
 		}
 	}
 
+	/// <inheritdoc/>
 	public async Task Purge()
 	{
 		ITransaction transaction = _database.CreateTransaction();
@@ -255,7 +317,8 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		await RebakeAll();
 	}
 
-	protected async Task Rebuild()
+	/// <inheritdoc/>
+	public async Task Rebuild()
 	{
 		RedisValue[]? keys = _database.HashKeys(BaseKey);
 		RedisValue[]? tracked = _database.SetMembers(BaseKeyTracker);
