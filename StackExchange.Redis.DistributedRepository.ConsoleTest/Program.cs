@@ -23,13 +23,15 @@ internal class Program
 				{
 					Console.SetCursorPosition(0, 0);
 					Console.Clear();
-					var all = repo1.GetAll();
+					var all = repo1.Get();
+					int counter = 1;
 					foreach (var item in all)
 					{
-						Console.WriteLine($"Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+						Console.WriteLine($"{counter} Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+						counter++;
 					}
 				}
-				Thread.Sleep(500); // Redraw every 0.5 sec
+				Thread.Sleep(1000); // Redraw every 0.5 sec
 			}
 		});
 
@@ -62,7 +64,7 @@ internal class Program
 		}
 	}
 
-	public static DistributedHashRepository<TestObjectModel> Start()
+	public static IDistributedRepository<TestObjectModel> Start()
 	{
 		IConfiguration configuration = new ConfigurationBuilder()
 			.AddUserSecrets<Program>().Build();
@@ -75,11 +77,11 @@ internal class Program
 		{
 			ConnectionString = configuration.GetConnectionString("redis"),
 			Database = 0,
-			KeyPrefix = "TestPrefix"
+			KeyPrefix = "TestPrefix:"
 		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
-		var repo = serviceProvider.GetRequiredService<DistributedHashRepository<TestObjectModel>>();
+		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
 		return repo;
 	}
 }
