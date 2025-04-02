@@ -1,78 +1,176 @@
-﻿using Microsoft.Extensions.Caching.Memory;
+﻿using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.Extensions.Core.Abstractions;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
+using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
+
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedHashRepository<T> where T : class
+public class DistributedHashRepository<T> : RepositoryBase<T>, IDistributedCache where T : class
 {
-	protected static string InstanceId = Guid.NewGuid().ToString(); 
-	private string _baseKey;
-	public string BaseKey
+	protected static string InstanceId = Guid.NewGuid().ToString();
+
+	/// <summary>
+	/// Base key for the repository object tracker
+	/// </summary>
+	protected string BaseKeyTracker
 	{
-		get
-		{
-			_baseKey ??= $"dsr:{typeof(T).Name}";
-			return _baseKey;
-		}
+		get => $"{BaseKey}:tracker";
 	}
 
-	public static Func<T, string> KeySelector;
+	/// <summary>
+	/// Base key for the repository distributed object lock
+	/// </summary>
+	protected string BaseKeyLock
+	{
+		get => $"{BaseKey}:lock";
+	}
+
+	/// <summary>
+	/// Key selector for the repository's entity
+	/// </summary>
+	public readonly Func<T, string> KeySelector;
 
 	private readonly IDatabase _database;
 	private readonly IRedisDatabase _redisDatabase;
 	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
 
-	public DistributedHashRepository(IRedisClient redis, IMemoryCache memoryCache)
+	public DistributedHashRepository(IRedisClient redis, IMemoryCache memoryCache, Func<T, string> keySelector)
 	{
 		_redisDatabase = redis.GetDefaultDatabase();
 		_database = _redisDatabase.Database;
 		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
-		_subscriber.Subscribe(BaseKey, ItemUpdatedLegacy);
+		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
 		_memoryCache = memoryCache;
+		KeySelector = keySelector;
+		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
 
 	public T Add(T item)
 	{
 		string key = KeySelector.Invoke(item);
-		string fqk = FQK(key);
-		_database.HashSet(BaseKey, key, JsonSerializer.Serialize(item));
+		string fqk = this.FQK(key);
+		ITransaction? transaction = _database.CreateTransaction();
+		transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+		transaction.SetAddAsync(BaseKeyTracker, key);
+		transaction.Execute();
 		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
 		return item;
 	}
 
-	public T Remove(T item)
+	public async Task<T> AddAsync(T item)
 	{
-		var key = KeySelector.Invoke(item);
-		_database.HashSet(FQK(key), key, JsonSerializer.Serialize(item));
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		string key = KeySelector.Invoke(item);
+		string fqk = this.FQK(key);
+		ITransaction? transaction = _database.CreateTransaction();
+		await transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+		await transaction.SetAddAsync(BaseKeyTracker, key);
+		await transaction.ExecuteAsync();
+		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
 		return item;
 	}
 
-	public T Get(string Key)
+	public T? Remove(T item)
 	{
-		if (_memoryCache.TryGetValue(FQK(Key), out T item))
-		{
-			return item;
-		}
-
-		if (_database.HashExists(BaseKey,Key))
-		{
-			item = JsonSerializer.Deserialize<T>(_database.HashGet(BaseKey, Key));
-			_memoryCache.Set(FQK(Key), item);
-			return item;
-		}
-
-		return default;
+		string? key = KeySelector.Invoke(item);
+		return Remove(key);
 	}
-	public IEnumerable<T> GetAll()
+
+	public async Task<T?> RemoveAsync(T item)
 	{
-		var keys = _database.HashKeys(BaseKey);
-		var items = new List<T>();
+		string? key = KeySelector.Invoke(item);
+		return await RemoveAsync(key);
+	}
+
+	public T? Remove(string key)
+	{
+		var poped = Get(key);
+		if (poped is null)
+			return null;
+		ITransaction transaction = _database.CreateTransaction();
+		transaction.HashDeleteAsync(BaseKey, key);
+		transaction.SetRemoveAsync(BaseKeyTracker, key);
+		transaction.Execute();
+		_memoryCache.Remove(this.FQK(key));
+		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		return poped;
+	}
+
+	public async Task<T?> RemoveAsync(string key)
+	{
+		var poped = await GetAsync(key);
+		if (poped is null)
+			return null;
+		ITransaction transaction = _database.CreateTransaction();
+		transaction.HashDeleteAsync(BaseKey, key);
+		transaction.SetRemoveAsync(BaseKeyTracker, key);
+		await transaction.ExecuteAsync();
+		_memoryCache.Remove(this.FQK(key));
+		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		return poped;
+	}
+
+	public T? Get(string Key)
+	{
+		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+		{
+			return item;
+		}
+
+		if (_database.HashExists(BaseKey, Key))
+		{
+			string? value = _database.HashGet(BaseKey, Key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			item = JsonSerializer.Deserialize<T?>(value);
+			_memoryCache.Set(this.FQK(Key), item);
+			return item;
+		}
+
+		return null;
+	}
+
+	public async Task<T?> GetAsync(string Key)
+	{
+		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+		{
+			return item;
+		}
+
+		if (_database.HashExists(BaseKey, Key))
+		{
+			string? value = await _database.HashGetAsync(BaseKey, Key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			item = JsonSerializer.Deserialize<T>(value);
+			_memoryCache.Set(this.FQK(Key), item);
+			return item;
+		}
+
+		return null;
+	}
+
+	public async Task<IEnumerable<T>> GetAsync()
+	{
+		RedisValue[]? keys = _database.HashKeys(BaseKey);
+		List<T>? items = new List<T>();
+		foreach (var key in keys)
+		{
+			items.Add(await GetAsync(key));
+		}
+		return items;
+	}
+
+	public IEnumerable<T> Get()
+	{
+		RedisValue[]? keys = _database.HashKeys(BaseKey);
+		List<T>? items = new List<T>();
 		foreach (var key in keys)
 		{
 			items.Add(Get(key));
@@ -80,63 +178,59 @@ public class DistributedHashRepository<T> where T : class
 		return items;
 	}
 
-	/// <summary>
-	/// Returns fully qualified key
-	/// </summary>
-	/// <param name="key"></param>
-	/// <returns></returns>
-	private string FQK(string key) => $"{BaseKey}:{key}";
-
-	/// <summary>
-	/// Returns fully qualified key
-	/// </summary>
-	/// <param name="item"></param>
-	/// <returns></returns>
-	private string FQK(T item) => $"{BaseKey}:{KeySelector.Invoke(item)}";
-
-	protected virtual void ItemUpdatedLegacy(RedisChannel channel, RedisValue value)
+	protected async Task RebakeAll()
 	{
-		 Message? message = JsonSerializer.Deserialize<Message>(value.ToString());
-
-		if (message is null)
-			return;
-		if (message.i == InstanceId)
-			return;
-
-		switch (message.type)
+		RedisValue[]? keys = _database.SetMembers(BaseKeyTracker);
+		_memoryCache.Set(
+			BaseKeyTracker,
+			keys.Where(x => x.HasValue).Select(x => x.ToString())
+		);
+		foreach (var item in keys)
 		{
-			case MessageType.Created:
-				T item = Get(message.item);
-				_memoryCache.Set(FQK(message.item), item);
-				break;
-			case MessageType.Updated:
-				T item2 = Get(message.item);
-				_memoryCache.Set(FQK(message.item), item2);
-				break;
-			case MessageType.Deleted:
-				_memoryCache.Remove(FQK(message.item));
-				break;
-			case MessageType.Purged:
-				//memory cache delete all items where key starts with
-				MemoryCache? cacheItems = _memoryCache as MemoryCache;
-				if (cacheItems is not null)
-				{
-					foreach (var cacheItem in cacheItems.Keys)
-					{
-						if (cacheItem?.ToString()?.StartsWith(BaseKey) ?? false)
-						{
-							_memoryCache.Remove(cacheItem);
-						}
-					}
-				}
-				break;
-			default:
-				break;
+			_memoryCache.Set(this.FQK(item.ToString()), Get(item));
 		}
 	}
 
-	protected virtual async Task ItemUpdated(Message? message)
+	public async Task Purge()
 	{
+		ITransaction transaction = _database.CreateTransaction();
+		await transaction.KeyDeleteAsync(BaseKey);
+		await transaction.KeyDeleteAsync(BaseKeyTracker);
+		await transaction.ExecuteAsync();
+		await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+		await RebakeAll();
+	}
+
+	protected async Task Rebuild()
+	{
+		RedisValue[]? keys = _database.HashKeys(BaseKey);
+		RedisValue[]? tracked = _database.SetMembers(BaseKeyTracker);
+
+		IEnumerable<RedisValue>? toRemove = tracked.Except(keys);
+		IEnumerable<RedisValue>? toAdd = keys.Except(tracked);
+
+		ITransaction? transaction = _database.CreateTransaction();
+
+		await transaction.SetRemoveAsync(BaseKeyTracker, toRemove.ToArray());
+		await transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
+		await transaction.ExecuteAsync();
+
+		_memoryCache.Set(
+			BaseKeyTracker,
+			keys.Where(x => x.HasValue).Select(x => x.ToString())
+		);
+
+		foreach (RedisValue key in keys)
+		{
+			_memoryCache.Set(this.FQK(key.ToString()), Get(key));
+		}
+
+	}
+
+	protected virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
+	{
+		Message? message = JsonSerializer.Deserialize<Message>(value.ToString());
+
 		if (message is null)
 			return;
 		if (message.i == InstanceId)
@@ -145,28 +239,30 @@ public class DistributedHashRepository<T> where T : class
 		switch (message.type)
 		{
 			case MessageType.Created:
-				T item = Get(message.item);
-				_memoryCache.Set(FQK(message.item), item);
+				if (string.IsNullOrEmpty(message.item))
+					return;
+				T? item = Get(message.item);
+				if (item is null) return;
+				_memoryCache.Set(this.FQK(message.item), item);
 				break;
 			case MessageType.Updated:
-				T item2 = Get(message.item);
-				_memoryCache.Set(FQK(message.item), item2);
+				if (string.IsNullOrEmpty(message.item))
+					return;
+				T? item2 = Get(message.item);
+				if (item2 is null) return;
+				_memoryCache.Set(this.FQK(message.item), item2);
 				break;
 			case MessageType.Deleted:
-				_memoryCache.Remove(FQK(message.item));
+				if (string.IsNullOrEmpty(message.item))
+					return;
+				_memoryCache.Remove(this.FQK(message.item));
 				break;
 			case MessageType.Purged:
-				//memory cache delete all items where key starts with
-				MemoryCache? cacheItems = _memoryCache as MemoryCache;
-				if (cacheItems is not null)
+				List<string>? keys = _memoryCache.Get<List<string>>(BaseKeyTracker);
+				if (keys is null || !keys.Any()) return;
+				foreach (var key in keys)
 				{
-					foreach (var cacheItem in cacheItems.Keys)
-					{
-						if (cacheItem?.ToString()?.StartsWith(BaseKey) ?? false)
-						{
-							_memoryCache.Remove(cacheItem);
-						}
-					}
+					_memoryCache.Remove(key);
 				}
 				break;
 			default:
@@ -180,4 +276,39 @@ public class DistributedHashRepository<T> where T : class
 			? $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType}}}"
 			: $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
 	}
+	
+	#region IDistributedCache
+	byte[]? IDistributedCache.Get(string key)
+	{
+		T? found = Get(key);
+		if (found is null)
+			return null;
+		return Serialize(found);
+	}
+	async Task<byte[]?> IDistributedCache.GetAsync(string key, CancellationToken token)
+	{
+		T? found = await GetAsync(key);
+		if (found is null)
+			return null;
+		return Serialize(found);
+	}
+	void IDistributedCache.Set(string key, byte[] value, DistributedCacheEntryOptions options)
+	{
+		Add(Deserialize<T>(value));
+	}
+	async Task IDistributedCache.SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token)
+	{
+		await AddAsync(Deserialize<T>(value));
+	}
+	void IDistributedCache.Refresh(string key) => throw new NotImplementedException();
+	Task IDistributedCache.RefreshAsync(string key, CancellationToken token) => throw new NotImplementedException();
+	void IDistributedCache.Remove(string key)
+	{
+		Remove(key);
+	}
+	async Task IDistributedCache.RemoveAsync(string key, CancellationToken token)
+	{
+		await RemoveAsync(key);
+	}
+	#endregion
 }

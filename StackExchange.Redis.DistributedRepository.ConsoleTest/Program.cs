@@ -23,7 +23,7 @@ internal class Program
 				{
 					Console.SetCursorPosition(0, 0);
 					Console.Clear();
-					var all = repo1.GetAll();
+					var all = repo1.Get();
 					foreach (var item in all)
 					{
 						Console.WriteLine($"Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
@@ -75,7 +75,7 @@ internal class Program
 		{
 			ConnectionString = configuration.GetConnectionString("redis"),
 			Database = 0,
-			KeyPrefix = "TestPrefix"
+			KeyPrefix = "TestPrefix:"
 		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
