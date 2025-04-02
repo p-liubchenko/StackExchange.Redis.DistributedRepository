@@ -33,10 +33,7 @@ public class DistributedHashRepository<T> where T : class
 		_database = _redisDatabase.Database;
 		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
 		_subscriber.Subscribe(BaseKey, ItemUpdatedLegacy);
-		//subscribe to the channel
-		//_redisDatabase.SubscribeAsync<Message>(BaseKey, ItemUpdated).Wait();
 		_memoryCache = memoryCache;
-		//_subscriber.Subscribe(BaseKey, ItemUpdated);
 	}
 
 	public T Add(T item)
@@ -45,7 +42,6 @@ public class DistributedHashRepository<T> where T : class
 		string fqk = FQK(key);
 		_database.HashSet(BaseKey, key, JsonSerializer.Serialize(item));
 		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
-		//_database.PublishAsync(BaseKey, GenerateMessage(MessageType.Created, key)).Wait();
 		return item;
 	}
 
@@ -54,7 +50,6 @@ public class DistributedHashRepository<T> where T : class
 		var key = KeySelector.Invoke(item);
 		_database.HashSet(FQK(key), key, JsonSerializer.Serialize(item));
 		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
-		//_database.PublishAsync(BaseKey, GenerateMessage(MessageType.Deleted, key)).Wait();
 		return item;
 	}
 
@@ -84,7 +79,19 @@ public class DistributedHashRepository<T> where T : class
 		}
 		return items;
 	}
+
+	/// <summary>
+	/// Returns fully qualified key
+	/// </summary>
+	/// <param name="key"></param>
+	/// <returns></returns>
 	private string FQK(string key) => $"{BaseKey}:{key}";
+
+	/// <summary>
+	/// Returns fully qualified key
+	/// </summary>
+	/// <param name="item"></param>
+	/// <returns></returns>
 	private string FQK(T item) => $"{BaseKey}:{KeySelector.Invoke(item)}";
 
 	protected virtual void ItemUpdatedLegacy(RedisChannel channel, RedisValue value)
