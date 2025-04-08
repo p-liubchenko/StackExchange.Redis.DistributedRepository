@@ -158,7 +158,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected async Task IndexRedis(string itemKey, T item)
 	{
-		if(_indexers is null || !_indexers.Any())
+		if (_indexers is null || !_indexers.Any())
 			return;
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.index.redis");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -324,31 +324,47 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	public virtual async Task<IEnumerable<T>> WhereAsync(Expression<Func<T, bool>> predicate)
 	{
-		IndexConditionExtractor<T>? extractor = new (
-			_indexers?.ToDictionary(x=>x.Name, x=>x.Index) ?? []
-			);
-		extractor.Visit(predicate.Body);
-
-		List<IndexedCondition>? indexConditions = extractor.IndexedMatches;
-
-		if (indexConditions.Count == 0)
-			return Get().Where(predicate.Compile());
-
-		IEnumerable<string>? ids = null;
-		foreach (var condition in indexConditions)
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.where");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			string? key = $"{IndexBaseKey}:{condition.IndexName}:{condition.Value}";
-			RedisValue[]? members = await _database.SetMembersAsync(key);
-			IEnumerable<string>? currentIds = members.Select(m => m.ToString());
 
-			ids = ids == null ? currentIds : ids.Intersect(currentIds);
+			IndexConditionExtractor<T>? extractor = new(
+				_indexers?.ToDictionary(x => x.Name, x => x.Index) ?? []
+				);
+			extractor.Visit(predicate.Body);
+
+			List<IndexedCondition>? indexConditions = extractor.IndexedMatches;
+
+			if (indexConditions.Count == 0)
+				return Get().Where(predicate.Compile());
+
+			IEnumerable<string>? ids = null;
+			foreach (var condition in indexConditions)
+			{
+				string? key = $"{IndexBaseKey}:{condition.IndexName}:{condition.Value}";
+				RedisValue[]? members = await _database.SetMembersAsync(key);
+				IEnumerable<string>? currentIds = members.Select(m => m.ToString());
+
+				ids = ids == null ? currentIds : ids.Intersect(currentIds);
+			}
+
+			if (ids is null)
+				return Enumerable.Empty<T>();
+			IEnumerable<T>? items = ids.Select(id => Get(id));
+
+			return items.Where(x => x is not null).Select(x => x!);
 		}
-
-		if (ids is null)
-			return Enumerable.Empty<T>();
-		IEnumerable<T>? items = ids.Select(id => Get(id));
-
-		return items.Where(x => x is not null).Select(x => x!);
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error searching items in repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.where", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	/// <inheritdoc/>

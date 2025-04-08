@@ -58,7 +58,7 @@ internal class Program
 							repo1.Purge();
 							break;
 						case ConsoleKey.W:
-							var found = repo1.WhereAsync(x => x.Name == "Test");
+							var found = repo1.WhereAsync(x => x.Name == "worker");
 							foreach (var item in found.Result)
 							{
 								Console.WriteLine($"Found: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
