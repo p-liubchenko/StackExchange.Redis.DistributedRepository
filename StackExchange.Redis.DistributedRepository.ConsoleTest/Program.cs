@@ -1,5 +1,4 @@
-﻿using System.Text.Json;
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis.DistributedRepository.ConsoleTest.Models;
 using StackExchange.Redis.DistributedRepository.Extensions.DI;
@@ -30,6 +29,7 @@ internal class Program
 						Console.WriteLine($"{counter} Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
 						counter++;
 					}
+					Console.WriteLine(StringRepositoryMetrics.ToUserFriendlyString());
 				}
 				Thread.Sleep(1000); // Redraw every 0.5 sec
 			}
@@ -54,6 +54,9 @@ internal class Program
 							};
 							repo1.Add(obj);
 							break;
+						case ConsoleKey.C:
+							repo1.Purge();
+							break;
 						case ConsoleKey.Escape:
 							exit = true;
 							break;
@@ -72,12 +75,13 @@ internal class Program
 		ServiceCollection services = new ServiceCollection();
 		services.AddMemoryCache();
 		services.AddLogging();
+		//services.AddScoped<IRepositoryMetrics?, StringRepositoryMetrics>();
 
 		services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
 		{
 			ConnectionString = configuration.GetConnectionString("redis"),
 			Database = 0,
-			KeyPrefix = "TestPrefix:"
+			KeyPrefix = "local:"
 		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		IServiceProvider serviceProvider = services.BuildServiceProvider();

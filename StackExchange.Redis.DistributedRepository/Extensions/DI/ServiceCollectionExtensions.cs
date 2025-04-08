@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using StackExchange.Redis.Extensions.Core.Abstractions;
 
 namespace StackExchange.Redis.DistributedRepository.Extensions.DI;
@@ -17,9 +18,11 @@ public static class ServiceCollectionExtensions
 	{
 		services.AddScoped<IDistributedRepository<T>>((provider) =>
 		{
-			IRedisClient? redis = provider.GetRequiredService<IRedisClient>();
-			IMemoryCache? memoryCache = provider.GetRequiredService<IMemoryCache>();
-			return new DistributedRepository<T>(redis, memoryCache, keySelector);
+			IRedisClient redis = provider.GetRequiredService<IRedisClient>();
+			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
+			IRepositoryMetrics? metrics = provider.GetService<IRepositoryMetrics>();
+			ILogger<DistributedRepository<T>>? logger = provider.GetService<ILogger<DistributedRepository<T>>>();
+			return new DistributedRepository<T>(redis, memoryCache, keySelector, metrics, logger);
 		});
 		return services;
 	}
@@ -28,8 +31,8 @@ public static class ServiceCollectionExtensions
 	{
 		services.AddScoped<IDistributedCache>((provider) =>
 		{
-			IRedisClient? redis = provider.GetRequiredService<IRedisClient>();
-			IMemoryCache? memoryCache = provider.GetRequiredService<IMemoryCache>();
+			IRedisClient redis = provider.GetRequiredService<IRedisClient>();
+			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
 			return new DistributedRepository<T>(redis, memoryCache, keySelector);
 		});
 		return services;

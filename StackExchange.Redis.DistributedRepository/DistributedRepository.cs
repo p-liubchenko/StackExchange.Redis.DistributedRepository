@@ -1,8 +1,11 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Models;
+using StackExchange.Redis.DistributedRepository.Telemetry;
 using StackExchange.Redis.Extensions.Core.Abstractions;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
@@ -47,14 +50,23 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	private readonly IRedisDatabase _redisDatabase;
 	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
+	private readonly IRepositoryMetrics? _metrics;
+	private readonly ILogger<DistributedRepository<T>>? _logger;
 
-	public DistributedRepository(IRedisClient redis, IMemoryCache memoryCache, Func<T, string> keySelector)
+	public DistributedRepository(
+		IRedisClient redis,
+		IMemoryCache memoryCache,
+		Func<T, string> keySelector,
+		IRepositoryMetrics? metrics = null,
+		ILogger<DistributedRepository<T>>? logger = null)
 	{
 		_redisDatabase = redis.GetDefaultDatabase();
 		_database = _redisDatabase.Database;
 		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
 		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
 		_memoryCache = memoryCache;
+		_metrics = metrics;
+		_logger = logger;
 		KeySelector = keySelector;
 		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
@@ -64,15 +76,37 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	public async Task<T> AddAsync(T item)
 	{
+		ArgumentNullException.ThrowIfNull(item);
 		string key = KeySelector.Invoke(item);
-		string fqk = this.FQK(key);
-		T result = await AddRedis(key, item);
-		MemoryAdd(item, fqk);
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
-		return result;
+
+		if (string.IsNullOrEmpty(key))
+			throw new ArgumentNullException(nameof(item), "KeySelector cannot return null or empty string");
+
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.add.redis", key: key);
+		Stopwatch? sw = Stopwatch.StartNew();
+
+		try
+		{
+
+			string fqk = this.FQK(key);
+			T result = await AddRedis(key, item);
+			MemoryAdd(item, fqk);
+			_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
+			return result;
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error adding item to repository");
+			throw;
+		}
+		finally
+		{
+			sw.Stop();
+			_metrics?.ObserveDuration("repo.add", sw.Elapsed);
+		}
 	}
 
-	public void AddRange(IEnumerable<T> range) => 
+	public void AddRange(IEnumerable<T> range) =>
 		AddRangeAsync(range).GetAwaiter().GetResult();
 
 	public async Task AddRangeAsync(IEnumerable<T> range)
@@ -83,14 +117,29 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected async Task RedisAddRange(IEnumerable<T> range)
 	{
-		ITransaction transaction = _database.CreateTransaction();
-		foreach (var item in range)
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.add-range.redis");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			string key = KeySelector.Invoke(item);
-			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-			transaction.SetAddAsync(BaseKeyTracker, key);
+
+			ITransaction transaction = _database.CreateTransaction();
+			foreach (var item in range)
+			{
+				string key = KeySelector.Invoke(item);
+				transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+				transaction.SetAddAsync(BaseKeyTracker, key);
+			}
+			await transaction.ExecuteAsync();
 		}
-		await transaction.ExecuteAsync();
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error adding items to repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.add-range.redis", sw.Elapsed);
+		}
 	}
 
 	protected void MemoryAddRange(IEnumerable<T> range)
@@ -111,11 +160,26 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected async Task<T> AddRedis(string key, T item)
 	{
-		ITransaction? transaction = _database.CreateTransaction();
-		transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-		transaction.SetAddAsync(BaseKeyTracker, key);
-		await transaction.ExecuteAsync();
-		return item;
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.add.redis", key: key);
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+
+			ITransaction? transaction = _database.CreateTransaction();
+			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
+			transaction.SetAddAsync(BaseKeyTracker, key);
+			await transaction.ExecuteAsync();
+			return item;
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error adding item to repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.add.redis", sw.Elapsed);
+		}
 	}
 	protected void MemoryAdd(T item, string fqk)
 	{
@@ -178,19 +242,34 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// <inheritdoc/>
 	public T? Get(string Key)
 	{
-		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			return item;
-		}
+			if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+			{
+				return item;
+			}
 
-		if (_database.HashExists(BaseKey, Key))
+			if (_database.HashExists(BaseKey, Key))
+			{
+				string? value = _database.HashGet(BaseKey, Key);
+				if (string.IsNullOrEmpty(value))
+					return null;
+				item = JsonSerializer.Deserialize<T?>(value);
+				_memoryCache.Set(this.FQK(Key), item);
+				return item;
+			}
+		}
+		catch (Exception ex)
 		{
-			string? value = _database.HashGet(BaseKey, Key);
-			if (string.IsNullOrEmpty(value))
-				return null;
-			item = JsonSerializer.Deserialize<T?>(value);
-			_memoryCache.Set(this.FQK(Key), item);
-			return item;
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
 		}
 
 		return null;
@@ -210,19 +289,34 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// <inheritdoc/>
 	public async Task<T?> GetAsync(string Key)
 	{
-		if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			return item;
-		}
+			if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+			{
+				return item;
+			}
 
-		if (_database.HashExists(BaseKey, Key))
+			if (_database.HashExists(BaseKey, Key))
+			{
+				string? value = await _database.HashGetAsync(BaseKey, Key);
+				if (string.IsNullOrEmpty(value))
+					return null;
+				item = JsonSerializer.Deserialize<T>(value);
+				_memoryCache.Set(this.FQK(Key), item);
+				return item;
+			}
+		}
+		catch (Exception ex)
 		{
-			string? value = await _database.HashGetAsync(BaseKey, Key);
-			if (string.IsNullOrEmpty(value))
-				return null;
-			item = JsonSerializer.Deserialize<T>(value);
-			_memoryCache.Set(this.FQK(Key), item);
-			return item;
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
 		}
 
 		return null;
@@ -298,50 +392,95 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// <inheritdoc/>
 	public async Task RebakeAll()
 	{
-		RedisValue[]? keys = _database.SetMembers(BaseKeyTracker);
-
-		foreach (var item in keys)
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebake");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			MemoryAdd(await GetAsync(item), this.FQK(item.ToString()));
+
+			RedisValue[]? keys = _database.SetMembers(BaseKeyTracker);
+
+			foreach (var item in keys)
+			{
+				MemoryAdd(await GetAsync(item), this.FQK(item.ToString()));
+			}
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error rebaking all items in repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.rebake", sw.Elapsed);
+			activity?.Stop();
 		}
 	}
 
 	/// <inheritdoc/>
 	public async Task Purge()
 	{
-		ITransaction transaction = _database.CreateTransaction();
-		transaction.KeyDeleteAsync(BaseKey);
-		transaction.KeyDeleteAsync(BaseKeyTracker);
-		await transaction.ExecuteAsync();
-		await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
-		await RebakeAll();
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.purge");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+			ITransaction transaction = _database.CreateTransaction();
+			transaction.KeyDeleteAsync(BaseKey);
+			transaction.KeyDeleteAsync(BaseKeyTracker);
+			await transaction.ExecuteAsync();
+			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			await RebakeAll();
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error purging all items in repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.purge", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	/// <inheritdoc/>
 	public async Task Rebuild()
 	{
-		RedisValue[]? keys = _database.HashKeys(BaseKey);
-		RedisValue[]? tracked = _database.SetMembers(BaseKeyTracker);
-
-		IEnumerable<RedisValue>? toRemove = tracked.Except(keys);
-		IEnumerable<RedisValue>? toAdd = keys.Except(tracked);
-
-		ITransaction? transaction = _database.CreateTransaction();
-
-		transaction.SetRemoveAsync(BaseKeyTracker, toRemove.ToArray());
-		transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
-		await transaction.ExecuteAsync();
-
-		_memoryCache.Set(
-			BaseKeyTracker,
-			keys.Where(x => x.HasValue).Select(x => x.ToString())
-		);
-
-		foreach (RedisValue key in keys)
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebuild");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
 		{
-			_memoryCache.Set(this.FQK(key.ToString()), Get(key));
-		}
+			RedisValue[]? keys = _database.HashKeys(BaseKey);
+			RedisValue[]? tracked = _database.SetMembers(BaseKeyTracker);
 
+			IEnumerable<RedisValue>? toRemove = tracked.Except(keys);
+			IEnumerable<RedisValue>? toAdd = keys.Except(tracked);
+
+			ITransaction? transaction = _database.CreateTransaction();
+
+			transaction.SetRemoveAsync(BaseKeyTracker, toRemove.ToArray());
+			transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
+			await transaction.ExecuteAsync();
+
+			_memoryCache.Set(
+				BaseKeyTracker,
+				keys.Where(x => x.HasValue).Select(x => x.ToString())
+			);
+
+			foreach (RedisValue key in keys)
+			{
+				_memoryCache.Set(this.FQK(key.ToString()), Get(key));
+			}
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error rebaking all items in repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.rebuild", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	protected virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
