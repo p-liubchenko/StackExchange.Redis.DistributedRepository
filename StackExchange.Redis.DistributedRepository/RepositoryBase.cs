@@ -13,7 +13,7 @@ public abstract class RepositoryBase<T> where T : class
 	{
 		get
 		{
-			_baseKey ??= $"dsr:{typeof(T).Name}";
+			_baseKey ??= $"dsr:{{{typeof(T).Name}}}";
 			return _baseKey;
 		}
 	}
