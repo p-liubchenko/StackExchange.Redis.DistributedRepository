@@ -75,7 +75,7 @@ internal class Program
 		ServiceCollection services = new ServiceCollection();
 		services.AddMemoryCache();
 		services.AddLogging();
-		//services.AddScoped<IRepositoryMetrics?, StringRepositoryMetrics>();
+		services.AddScoped<IRepositoryMetrics, StringRepositoryMetrics>();
 
 		services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
 		{

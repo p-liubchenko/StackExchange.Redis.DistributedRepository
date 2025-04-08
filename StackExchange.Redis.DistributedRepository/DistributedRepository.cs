@@ -428,6 +428,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			transaction.KeyDeleteAsync(BaseKeyTracker);
 			await transaction.ExecuteAsync();
 			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			MemoryPurge();
 			await RebakeAll();
 		}
 		catch (Exception ex)
@@ -440,6 +441,22 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			_metrics?.ObserveDuration("repo.purge", sw.Elapsed);
 			activity?.Stop();
 		}
+	}
+
+	public void MemoryPurge()
+	{
+		List<T>? items = _memoryCache.Get<List<T>>(MemoryListKey);
+		if (items is null)
+			return;
+		foreach (var item in items)
+		{
+			_memoryCache.Remove(this.FQK(KeySelector.Invoke(item)));
+		}
+
+		_memoryCache.Set(
+			MemoryListKey,
+			new List<T>()
+		);
 	}
 
 	/// <inheritdoc/>
@@ -461,14 +478,9 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			transaction.SetAddAsync(BaseKeyTracker, toAdd.ToArray());
 			await transaction.ExecuteAsync();
 
-			_memoryCache.Set(
-				BaseKeyTracker,
-				keys.Where(x => x.HasValue).Select(x => x.ToString())
-			);
-
 			foreach (RedisValue key in keys)
 			{
-				_memoryCache.Set(this.FQK(key.ToString()), Get(key));
+				MemoryAdd(await GetAsync(key), this.FQK(key.ToString()));
 			}
 		}
 		catch (Exception ex)
