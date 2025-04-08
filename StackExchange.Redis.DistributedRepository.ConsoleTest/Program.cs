@@ -48,7 +48,7 @@ internal class Program
 						case ConsoleKey.Enter:
 							var obj = new TestObjectModel()
 							{
-								Name = "Test",
+                                Name = Random.Shared.Next(0, 2) == 0 ? "tester" : "worker",
 								Description = "Test Description",
 								DecVal = 1.1m
 							};
@@ -56,6 +56,13 @@ internal class Program
 							break;
 						case ConsoleKey.C:
 							repo1.Purge();
+							break;
+						case ConsoleKey.W:
+							var found = repo1.WhereAsync(x => x.Name == "Test");
+							foreach (var item in found.Result)
+							{
+								Console.WriteLine($"Found: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+							}
 							break;
 						case ConsoleKey.Escape:
 							exit = true;
@@ -84,6 +91,7 @@ internal class Program
 			KeyPrefix = "local:"
 		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
+		services.AddIndexer<TestObjectModel>(x=>x.Name);
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
 		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
 		return repo;

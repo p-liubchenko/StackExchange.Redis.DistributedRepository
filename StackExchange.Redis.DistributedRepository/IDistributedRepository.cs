@@ -1,5 +1,7 @@
 ﻿
 
+using System.Linq.Expressions;
+
 namespace StackExchange.Redis.DistributedRepository;
 
 /// <summary>
@@ -65,6 +67,13 @@ public interface IDistributedRepository<T> where T : class
 	/// <param name="factory"></param>
 	/// <returns></returns>
 	Task<T> GetOrAddAsync(string key, Func<Task<T>> factory);
+
+	/// <summary>
+	/// Gets an item from the repository by predicate condition
+	/// </summary>
+	/// <param name="predicate"></param>
+	/// <returns></returns>
+	Task<IEnumerable<T>> WhereAsync(Expression<Func<T, bool>> predicate);
 
 	/// <summary>
 	/// Purges the repository

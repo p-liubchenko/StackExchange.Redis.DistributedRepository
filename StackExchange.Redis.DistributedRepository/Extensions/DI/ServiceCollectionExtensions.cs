@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Caching.Distributed;
+﻿using System.Linq.Expressions;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -22,7 +23,8 @@ public static class ServiceCollectionExtensions
 			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
 			IRepositoryMetrics? metrics = provider.GetService<IRepositoryMetrics>();
 			ILogger<DistributedRepository<T>>? logger = provider.GetService<ILogger<DistributedRepository<T>>>();
-			return new DistributedRepository<T>(redis, keySelector, metrics, logger);
+			IEnumerable<RedisIndexer<T>>? indexers = provider.GetServices<RedisIndexer<T>>();
+			return new DistributedRepository<T>(redis, keySelector, metrics, logger, indexers);
 		});
 		return services;
 	}
@@ -42,7 +44,26 @@ public static class ServiceCollectionExtensions
 			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
 			IRepositoryMetrics? metrics = provider.GetService<IRepositoryMetrics>();
 			ILogger<DistributedBackedRepository<T>>? logger = provider.GetService<ILogger<DistributedBackedRepository<T>>>();
-			return new DistributedBackedRepository<T>(redis, memoryCache, keySelector, metrics, logger);
+			IEnumerable<RedisIndexer<T>>? indexers = provider.GetServices<RedisIndexer<T>>();
+			return new DistributedBackedRepository<T>(redis, memoryCache, keySelector, metrics, logger, indexers);
+		});
+		return services;
+	}
+
+	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, string indexName, Expression<Func<T, object>> expression)
+	{
+		services.AddSingleton<RedisIndexer<T>>((provider) =>
+		{
+			return new RedisIndexer<T>(indexName, expression);
+		});
+		return services;
+	}
+
+	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, Expression<Func<T, object>> expression)
+	{
+		services.AddSingleton<RedisIndexer<T>>((provider) =>
+		{
+			return new RedisIndexer<T>(IndexingExtensions.ExtractPropertyName(expression), expression);
 		});
 		return services;
 	}
