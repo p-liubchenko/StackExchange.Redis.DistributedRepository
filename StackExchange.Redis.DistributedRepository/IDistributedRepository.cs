@@ -71,7 +71,6 @@ public interface IDistributedRepository<T> where T : class
 	/// </summary>
 	/// <returns></returns>
 	Task Purge();
-	Task RebakeAll();
 
 	/// <summary>
 	/// Rebuilds the repository, syncing with distributed cache with in-memory, taking distributed data container as source of truth
