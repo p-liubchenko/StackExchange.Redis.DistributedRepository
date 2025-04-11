@@ -6,24 +6,15 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using StackExchange.Redis.Extensions.Core.Abstractions;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCache, IDistributedRepository<T> where T : class
+public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistributedCache where T : class
 {
 	protected static string InstanceId = Guid.NewGuid().ToString();
-
-	/// <summary>
-	/// Base key for the repository object tracker
-	/// </summary>
-	protected string BaseKeyTracker
-	{
-		get => $"{BaseKey}:tracker";
-	}
 
 	/// <summary>
 	/// Base key for the repository distributed object lock
@@ -47,23 +38,21 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	public readonly Func<T, string> KeySelector;
 
 	private readonly IDatabase _database;
-	private readonly IRedisDatabase _redisDatabase;
 	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
 	private readonly IRepositoryMetrics? _metrics;
 	private readonly ILogger<DistributedBackedRepository<T>>? _logger;
 
 	public DistributedBackedRepository(
-		IRedisClient redis,
+		IConnectionMultiplexer redis,
 		IMemoryCache memoryCache,
 		Func<T, string> keySelector,
 		IRepositoryMetrics? metrics = null,
-		ILogger<DistributedBackedRepository<T>>? logger = null)
+		ILogger<DistributedBackedRepository<T>>? logger = null,
+		IEnumerable<RedisIndexer<T>>? indexers = null,
+		string? keyPrefix = null) : base(redis, keySelector, metrics, logger, indexers, keyPrefix: keyPrefix)
 	{
-		_redisDatabase = redis.GetDefaultDatabase();
-		_database = _redisDatabase.Database;
-		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
-		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
+
 		_memoryCache = memoryCache;
 		_metrics = metrics;
 		_logger = logger;
@@ -72,9 +61,9 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	#region add
-	public T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
+	public new T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
-	public async Task<T> AddAsync(T item)
+	public new async Task<T> AddAsync(T item)
 	{
 		ArgumentNullException.ThrowIfNull(item);
 		string key = KeySelector.Invoke(item);
@@ -106,40 +95,13 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 		}
 	}
 
-	public void AddRange(IEnumerable<T> range) =>
+	public new void AddRange(IEnumerable<T> range) =>
 		AddRangeAsync(range).GetAwaiter().GetResult();
 
-	public async Task AddRangeAsync(IEnumerable<T> range)
+	public new async Task AddRangeAsync(IEnumerable<T> range)
 	{
 		await RedisAddRange(range);
 		MemoryAddRange(range);
-	}
-
-	protected async Task RedisAddRange(IEnumerable<T> range)
-	{
-		using Activity? activity = ActivitySourceProvider.StartActivity("repo.add-range.redis");
-		Stopwatch? sw = Stopwatch.StartNew();
-		try
-		{
-
-			ITransaction transaction = _database.CreateTransaction();
-			foreach (var item in range)
-			{
-				string key = KeySelector.Invoke(item);
-				transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-				transaction.SetAddAsync(BaseKeyTracker, key);
-			}
-			await transaction.ExecuteAsync();
-		}
-		catch (Exception ex)
-		{
-			_logger?.LogError(ex, "Error adding items to repository");
-			throw;
-		}
-		finally
-		{
-			_metrics?.ObserveDuration("repo.add-range.redis", sw.Elapsed);
-		}
 	}
 
 	protected void MemoryAddRange(IEnumerable<T> range)
@@ -158,29 +120,6 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 		}
 	}
 
-	protected async Task<T> AddRedis(string key, T item)
-	{
-		using Activity? activity = ActivitySourceProvider.StartActivity("repo.add.redis", key: key);
-		Stopwatch? sw = Stopwatch.StartNew();
-		try
-		{
-
-			ITransaction? transaction = _database.CreateTransaction();
-			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
-			transaction.SetAddAsync(BaseKeyTracker, key);
-			await transaction.ExecuteAsync();
-			return item;
-		}
-		catch (Exception ex)
-		{
-			_logger?.LogError(ex, "Error adding item to repository");
-			throw;
-		}
-		finally
-		{
-			_metrics?.ObserveDuration("repo.add.redis", sw.Elapsed);
-		}
-	}
 	protected void MemoryAdd(T item, string fqk)
 	{
 		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
@@ -196,21 +135,21 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	#endregion
 
 	#region remove
-	public T? Remove(T item)
+	public new T? Remove(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return Remove(key);
 	}
 
-	public async Task<T?> RemoveAsync(T item)
+	public new async Task<T?> RemoveAsync(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return await RemoveAsync(key);
 	}
 
-	public T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
+	public new T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
 
-	public async Task<T?> RemoveAsync(string key)
+	public new async Task<T?> RemoveAsync(string key)
 	{
 		var poped = await GetAsync(key);
 		if (poped is null)
@@ -221,13 +160,6 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 		return poped;
 	}
 
-	protected async Task RemoveRedis(string key)
-	{
-		ITransaction transaction = _database.CreateTransaction();
-		transaction.HashDeleteAsync(BaseKey, key);
-		transaction.SetRemoveAsync(BaseKeyTracker, key);
-		await transaction.ExecuteAsync();
-	}
 	protected void RemoveMemory(string key)
 	{
 		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
@@ -240,7 +172,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	#endregion
 
 	/// <inheritdoc/>
-	public T? Get(string Key)
+	public new T? Get(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -276,7 +208,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public T GetOrAdd(string key, Func<T> factory)
+	public new T GetOrAdd(string key, Func<T> factory)
 	{
 		T? item = Get(key);
 		if (item is not null)
@@ -287,7 +219,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public async Task<T?> GetAsync(string Key)
+	public new async Task<T?> GetAsync(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -323,7 +255,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
+	public new async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
 	{
 		T? item = await GetAsync(key);
 		if (item is not null)
@@ -334,7 +266,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public async Task<IEnumerable<T>> GetAsync()
+	public new async Task<IEnumerable<T>> GetAsync()
 	{
 		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
 		if (!fetchedFromMemory || items is null)
@@ -362,7 +294,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public IEnumerable<T> Get()
+	public new IEnumerable<T> Get()
 	{
 		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
 		if (!fetchedFromMemory || items is null)
@@ -417,7 +349,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public async Task Purge()
+	public new async Task Purge()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.purge");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -460,7 +392,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 	}
 
 	/// <inheritdoc/>
-	public async Task Rebuild()
+	public new async Task Rebuild()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebuild");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -495,7 +427,7 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 		}
 	}
 
-	protected virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
+	protected new virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
 	{
 		Message? message = JsonSerializer.Deserialize<Message>(value.ToString());
 
@@ -536,13 +468,6 @@ public class DistributedBackedRepository<T> : RepositoryBase<T>, IDistributedCac
 			default:
 				break;
 		}
-	}
-
-	internal string GenerateMessage(MessageType messageType, string? resourceKey)
-	{
-		return resourceKey is null
-			? $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType}}}"
-			: $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
 	}
 
 	#region IDistributedCache

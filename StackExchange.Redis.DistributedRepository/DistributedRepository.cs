@@ -1,11 +1,12 @@
 ﻿using System.Diagnostics;
+using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
+using StackExchange.Redis.DistributedRepository.Indexing;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using StackExchange.Redis.Extensions.Core.Abstractions;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
@@ -37,31 +38,36 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// </summary>
 	public readonly Func<T, string> KeySelector;
 
-	private readonly IDatabase _database;
-	private readonly IRedisDatabase _redisDatabase;
-	private readonly ISubscriber _subscriber;
-	private readonly IRepositoryMetrics? _metrics;
-	private readonly ILogger<DistributedRepository<T>>? _logger;
+	protected readonly IDatabase _database;
+	protected readonly ISubscriber _bus;
+	protected readonly IRepositoryMetrics? _metrics;
+	protected readonly ILogger<DistributedRepository<T>>? _logger;
+	protected readonly IEnumerable<RedisIndexer<T>>? _indexers;
 
 	public DistributedRepository(
-		IRedisClient redis,
+		IConnectionMultiplexer connection,
 		Func<T, string> keySelector,
 		IRepositoryMetrics? metrics = null,
-		ILogger<DistributedRepository<T>>? logger = null)
+		ILogger<DistributedRepository<T>>? logger = null,
+		IEnumerable<RedisIndexer<T>>? indexers = null,
+		string? keyPrefix = null)
 	{
-		_redisDatabase = redis.GetDefaultDatabase();
-		_database = _redisDatabase.Database;
-		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
-		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
+		_globalPrefix = keyPrefix;
+		_database = connection.GetDatabase();
+		_bus = connection.GetSubscriber();
+		if (_bus.Ping() == TimeSpan.Zero)
+			throw new Exception("Redis bus is not available");
+		_bus.Subscribe(RedisChannel.Literal(BaseKey), ItemUpdatedHandler);
 		_metrics = metrics;
 		_logger = logger;
+		_indexers = indexers;
 		KeySelector = keySelector;
 	}
 
 	#region add
 	public T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
-	public async Task<T> AddAsync(T item)
+	public virtual async Task<T> AddAsync(T item)
 	{
 		ArgumentNullException.ThrowIfNull(item);
 		string key = KeySelector.Invoke(item);
@@ -77,7 +83,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
-			_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
+			_bus.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -92,10 +98,10 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		}
 	}
 
-	public void AddRange(IEnumerable<T> range) =>
+	public virtual void AddRange(IEnumerable<T> range) =>
 		AddRangeAsync(range).GetAwaiter().GetResult();
 
-	public async Task AddRangeAsync(IEnumerable<T> range)
+	public virtual async Task AddRangeAsync(IEnumerable<T> range)
 	{
 		await RedisAddRange(range);
 	}
@@ -113,6 +119,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 				string key = KeySelector.Invoke(item);
 				transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
 				transaction.SetAddAsync(BaseKeyTracker, key);
+				IndexRangeRedis(ref transaction, range);
 			}
 			await transaction.ExecuteAsync();
 		}
@@ -133,10 +140,10 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-
 			ITransaction? transaction = _database.CreateTransaction();
 			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
 			transaction.SetAddAsync(BaseKeyTracker, key);
+			IndexRedis(ref transaction, item, key);
 			await transaction.ExecuteAsync();
 			return item;
 		}
@@ -150,30 +157,78 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			_metrics?.ObserveDuration("repo.add.redis", sw.Elapsed);
 		}
 	}
+
+	protected ITransaction IndexRedis(ref ITransaction transaction, T item, string itemKey)
+	{
+		foreach (var indexer in _indexers)
+		{
+			transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{IndexKeyHelper.NormalizeValue(indexer.IndexSelector.Invoke(item))}", itemKey);
+		}
+		return transaction;
+	}
+
+	protected ITransaction IndexRangeRedis(ref ITransaction transaction, IEnumerable<T> items)
+	{
+		foreach (var item in items)
+		{
+			IndexRedis(ref transaction, item, KeySelector.Invoke(item));
+		}
+
+		return transaction;
+	}
+
+	protected async Task IndexRedis(string itemKey, T item)
+	{
+		if (_indexers is null || !_indexers.Any())
+			return;
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.index.redis");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+			ITransaction transaction = _database.CreateTransaction();
+			foreach (var indexer in _indexers)
+			{
+				transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{indexer.IndexSelector.Invoke(item)?.ToString()}", itemKey);
+			}
+			await transaction.ExecuteAsync();
+			return;
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error adding item to repository");
+			throw;
+		}
+		finally
+		{
+			sw.Stop();
+			_metrics?.ObserveDuration("repo.index.redis", sw.Elapsed);
+		}
+	}
+
 	#endregion
 
 	#region remove
-	public T? Remove(T item)
+	public virtual T? Remove(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return Remove(key);
 	}
 
-	public async Task<T?> RemoveAsync(T item)
+	public virtual async Task<T?> RemoveAsync(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return await RemoveAsync(key);
 	}
 
-	public T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
+	public virtual T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
 
-	public async Task<T?> RemoveAsync(string key)
+	public virtual async Task<T?> RemoveAsync(string key)
 	{
 		var poped = await GetAsync(key);
 		if (poped is null)
 			return null;
 		await RemoveRedis(key);
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		_bus.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
 		return poped;
 	}
 
@@ -187,7 +242,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	#endregion
 
 	/// <inheritdoc/>
-	public T? Get(string Key)
+	public virtual T? Get(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -217,7 +272,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	/// <inheritdoc/>
-	public T GetOrAdd(string key, Func<T> factory)
+	public virtual T GetOrAdd(string key, Func<T> factory)
 	{
 		T? item = Get(key);
 		if (item is not null)
@@ -228,7 +283,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	/// <inheritdoc/>
-	public async Task<T?> GetAsync(string Key)
+	public virtual async Task<T?> GetAsync(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -258,7 +313,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	/// <inheritdoc/>
-	public async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
+	public virtual async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
 	{
 		T? item = await GetAsync(key);
 		if (item is not null)
@@ -269,7 +324,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	/// <inheritdoc/>
-	public async Task<IEnumerable<T>> GetAsync()
+	public virtual async Task<IEnumerable<T>> GetAsync()
 	{
 		HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
 
@@ -279,7 +334,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	/// <inheritdoc/>
-	public IEnumerable<T> Get()
+	public virtual IEnumerable<T> Get()
 	{
 		HashEntry[]? objects = _database.HashGetAll(BaseKey);
 
@@ -288,8 +343,53 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		return values.Where(x => x.Value is not null).Select(x => x.Value);
 	}
 
+	public virtual async Task<IEnumerable<T>> WhereAsync(Expression<Func<T, bool>> predicate)
+	{
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.where");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+
+			IndexConditionExtractor<T>? extractor = new(
+				_indexers?.ToDictionary(x => x.Name, x => x.Index) ?? []
+				);
+			extractor.Visit(predicate.Body);
+
+			List<IndexedCondition>? indexConditions = extractor.IndexedMatches;
+
+			if (indexConditions.Count == 0)
+				return Get().Where(predicate.Compile());
+
+			IEnumerable<string>? ids = null;
+			foreach (var condition in indexConditions)
+			{
+				string? key = $"{IndexBaseKey}:{condition.IndexName}:{IndexKeyHelper.NormalizeValue(condition.Value)}";
+				RedisValue[]? members = await _database.SetMembersAsync(key);
+				IEnumerable<string>? currentIds = members.Select(m => m.ToString());
+
+				ids = ids == null ? currentIds : ids.Intersect(currentIds);
+			}
+
+			if (ids is null)
+				return Enumerable.Empty<T>();
+			IEnumerable<T>? items = ids.Select(id => Get(id));
+
+			return items.Where(x => x is not null).Where(predicate.Compile()).Select(x => x!);
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error searching items in repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.where", sw.Elapsed);
+			activity?.Stop();
+		}
+	}
+
 	/// <inheritdoc/>
-	public async Task Purge()
+	public virtual async Task Purge()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.purge");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -298,8 +398,9 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			ITransaction transaction = _database.CreateTransaction();
 			transaction.KeyDeleteAsync(BaseKey);
 			transaction.KeyDeleteAsync(BaseKeyTracker);
+			PurgeIndex(ref transaction);
 			await transaction.ExecuteAsync();
-			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			await _bus.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
 		}
 		catch (Exception ex)
 		{
@@ -312,9 +413,26 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			activity?.Stop();
 		}
 	}
+	public virtual void PurgeIndex(ref ITransaction transaction)
+	{
+		// Delete all index values and their corresponding sets
+		if (_indexers is null)
+			return;
+		string pattern = $"{_globalPrefix}{IndexBaseKey}:*";
 
+		RedisResult? result = _database.ScriptEvaluate($"return redis.call('keys', '{pattern}')");
+
+		if (result.Type == ResultType.Array)
+		{
+			foreach (var redisValue in (RedisResult[])result)
+			{
+				string key = (string)redisValue;
+				transaction.KeyDeleteAsync(key);
+			}
+		}
+	}
 	/// <inheritdoc/>
-	public async Task Rebuild()
+	public virtual async Task Rebuild()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebuild");
 		Stopwatch? sw = Stopwatch.StartNew();

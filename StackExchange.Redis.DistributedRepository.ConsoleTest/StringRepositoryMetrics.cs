@@ -22,7 +22,7 @@ public class StringRepositoryMetrics : IRepositoryMetrics
 	{
 		if (observations.ContainsKey(operation))
 		{
-			observations[operation] += duration.Ticks;
+			observations[operation] = duration.Ticks;
 		}
 		else
 		{
