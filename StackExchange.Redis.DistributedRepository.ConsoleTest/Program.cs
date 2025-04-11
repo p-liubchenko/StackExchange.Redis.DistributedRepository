@@ -1,9 +1,7 @@
-﻿using System.Text.Json;
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis.DistributedRepository.ConsoleTest.Models;
 using StackExchange.Redis.DistributedRepository.Extensions.DI;
-using StackExchange.Redis.Extensions.System.Text.Json;
 
 namespace StackExchange.Redis.DistributedRepository.ConsoleTest;
 
@@ -23,13 +21,16 @@ internal class Program
 				{
 					Console.SetCursorPosition(0, 0);
 					Console.Clear();
-					var all = repo1.GetAll();
+					var all = repo1.Get();
+					int counter = 1;
 					foreach (var item in all)
 					{
-						Console.WriteLine($"Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+						Console.WriteLine($"{counter} Id: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+						counter++;
 					}
+					Console.WriteLine(StringRepositoryMetrics.ToUserFriendlyString());
 				}
-				Thread.Sleep(500); // Redraw every 0.5 sec
+				Thread.Sleep(1000); // Redraw every 0.5 sec
 			}
 		});
 
@@ -46,11 +47,22 @@ internal class Program
 						case ConsoleKey.Enter:
 							var obj = new TestObjectModel()
 							{
-								Name = "Test",
+								Name = Random.Shared.Next(0, 2) == 0 ? "tester" : "worker",
 								Description = "Test Description",
-								DecVal = 1.1m
+								DecVal = 1.1m,
+								ObjType = (TestEnum)Random.Shared.Next(0, 5),
 							};
 							repo1.Add(obj);
+							break;
+						case ConsoleKey.C:
+							repo1.Purge();
+							break;
+						case ConsoleKey.W:
+							var found = repo1.WhereAsync(x => x.Name == "worker" && x.Created.Year == 2025 && x.ObjType == TestEnum.None);
+							foreach (var item in found.Result)
+							{
+								Console.WriteLine($"Found: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal} OnjType: {item.ObjType}");
+							}
 							break;
 						case ConsoleKey.Escape:
 							exit = true;
@@ -62,7 +74,7 @@ internal class Program
 		}
 	}
 
-	public static DistributedHashRepository<TestObjectModel> Start()
+	public static IDistributedRepository<TestObjectModel> Start()
 	{
 		IConfiguration configuration = new ConfigurationBuilder()
 			.AddUserSecrets<Program>().Build();
@@ -70,16 +82,20 @@ internal class Program
 		ServiceCollection services = new ServiceCollection();
 		services.AddMemoryCache();
 		services.AddLogging();
-
-		services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
+		services.AddScoped<IRepositoryMetrics, StringRepositoryMetrics>();
+		services.AddSingleton<IConnectionMultiplexer>((provider) =>
 		{
-			ConnectionString = configuration.GetConnectionString("redis"),
-			Database = 0,
-			KeyPrefix = "TestPrefix"
+			string? redis_cs = configuration.GetConnectionString("redis");
+			if (string.IsNullOrEmpty(redis_cs)) throw new Exception("Redis connection string should not be null");
+			return ConnectionMultiplexer.Connect(redis_cs);
 		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
+		services.AddIndexer<TestObjectModel>(x => x.Name);
+		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Year);
+		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Month);
+		services.AddIndexer<TestObjectModel>(x => x.ObjType);
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
-		var repo = serviceProvider.GetRequiredService<DistributedHashRepository<TestObjectModel>>();
+		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
 		return repo;
 	}
 }
