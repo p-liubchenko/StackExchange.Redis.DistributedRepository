@@ -6,8 +6,8 @@ using StackExchange.Redis.DistributedRepository.Extensions.DI;
 namespace StackExchange.Redis.DistributedRepository.Banchmark;
 public class RepositoryBenchmark
 {
-	IDistributedRepository<TestObjectModel> dr1 = Start();
-	IDistributedRepository<TestObjectModel> dr2 = Start();
+	IDistributedRepository<TestObjectModel> _dr1 = Start();
+	IDistributedRepository<TestObjectModel> _dr2 = Start();
 
 	TestObjectModel tom = new TestObjectModel()
 	{
@@ -30,14 +30,14 @@ public class RepositoryBenchmark
 		DecVal = 1.1m
 	};
 
-	string firstKey;
-	string firstKey2;
+	string _firstKey;
+	string _firstKey2;
 
 	public RepositoryBenchmark()
 	{
-		firstKey = tom.Id.ToString();
-		firstKey2 = tom2.Id.ToString();
-		dr1.Purge();
+		_firstKey = tom.Id.ToString();
+		_firstKey2 = tom2.Id.ToString();
+		_dr1.Purge();
 		List<TestObjectModel> list = new List<TestObjectModel>();
 		for (int i = 0; i < 100000; i++)
 		{
@@ -48,27 +48,27 @@ public class RepositoryBenchmark
 				DecVal = 1.1m
 			});
 		}
-		dr1.AddRange(list);
+		_dr1.AddRange(list);
 	}
 
 	[Benchmark]
 	public string GetFromSame()
 	{
-		dr1.Add(tom);
-		return dr1.Get(firstKey)?.Name;
+		_dr1.Add(tom);
+		return _dr1.Get(_firstKey)?.Name;
 	}
 
 	[Benchmark]
 	public string GetSingle()
 	{
-		dr1.Add(tom2);
-		return dr2.Get(firstKey2)?.Name;
+		_dr1.Add(tom2);
+		return _dr2.Get(_firstKey2)?.Name;
 	}
 
 	[Benchmark]
 	public void GetAll()
 	{
-		var all = dr2.Get();
+		var all = _dr2.Get();
 	}
 
 	//[Benchmark]
@@ -97,8 +97,8 @@ public class RepositoryBenchmark
 public class TestObjectModel
 {
 	public Guid Id { get; set; } = Guid.NewGuid();
-	public string Name { get; set; }
-	public string Description { get; set; }
+	public string? Name { get; set; }
+	public string? Description { get; set; }
 	public decimal DecVal { get; set; }
 	public DateTime Created { get; set; } = DateTime.UtcNow;
 }

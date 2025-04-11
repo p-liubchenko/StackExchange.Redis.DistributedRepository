@@ -36,6 +36,6 @@ public class RedisIndexer<T> where T : class
 		var memberType = ((PropertyInfo?)memberExpr.Member)?.PropertyType ?? memberExpr.Type;
 
 		if (!IndexKeyHelper.IsIndexableType(memberType))
-			throw new InvalidOperationException($"Cannot index member '{memberExpr.Member.Name}' of type '{memberType.Name}' — not supported.");
+			throw new InvalidOperationException($"Cannot index member '{memberExpr?.Member?.Name}' of type '{memberType.Name}' — not supported.");
 	}
 }

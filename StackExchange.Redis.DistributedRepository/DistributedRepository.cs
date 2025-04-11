@@ -15,7 +15,7 @@ namespace StackExchange.Redis.DistributedRepository;
 
 public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, IDistributedRepository<T> where T : class
 {
-	protected static string InstanceId = Guid.NewGuid().ToString();
+	protected static string _instanceId = Guid.NewGuid().ToString();
 
 	/// <summary>
 	/// Base key for the repository object tracker
@@ -162,6 +162,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected ITransaction IndexRedis(ref ITransaction transaction, T item, string itemKey)
 	{
+		if (_indexers is null || !_indexers.Any()) return transaction;
 		foreach (var indexer in _indexers)
 		{
 			transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{IndexKeyHelper.NormalizeValue(indexer.IndexSelector.Invoke(item))}", itemKey);
@@ -171,6 +172,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected ITransaction IndexRangeRedis(ref ITransaction transaction, IEnumerable<T> items)
 	{
+		if (_indexers is null || !_indexers.Any()) return transaction;
 		foreach (var item in items)
 		{
 			IndexRedis(ref transaction, item, KeySelector.Invoke(item));
@@ -402,7 +404,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			transaction.KeyDeleteAsync(BaseKeyTracker);
 			PurgeIndex(ref transaction);
 			await transaction.ExecuteAsync();
-			await _bus.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Purged, null));
 		}
 		catch (Exception ex)
 		{
@@ -424,11 +426,12 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 		RedisResult? result = _database.ScriptEvaluate($"return redis.call('keys', '{pattern}')");
 
-		if (result is not null && result.Type == ResultType.Array)
+		if (result is not null && result.Resp2Type == ResultType.Array)
 		{
-			foreach (var redisValue in (RedisResult[])result)
+			foreach (RedisResult redisValue in (RedisResult[])result!)
 			{
-				string key = (string)redisValue;
+				if(redisValue is null) continue;
+				string key = (string)redisValue!;
 				transaction.KeyDeleteAsync(key);
 			}
 		}
@@ -471,7 +474,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 		if (message is null)
 			return;
-		if (message.i == InstanceId)
+		if (message.i == _instanceId)
 			return;
 
 		return;
@@ -480,8 +483,8 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	internal string GenerateMessage(MessageType messageType, string? resourceKey)
 	{
 		return resourceKey is null
-			? $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType}}}"
-			: $"{{ \"i\":\"{InstanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
+			? $"{{ \"i\":\"{_instanceId}\", \"type\":{(int)messageType}}}"
+			: $"{{ \"i\":\"{_instanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
 	}
 
 	#region IDistributedCache

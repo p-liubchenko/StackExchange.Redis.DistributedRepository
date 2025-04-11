@@ -14,8 +14,6 @@ namespace StackExchange.Redis.DistributedRepository;
 
 public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistributedCache where T : class
 {
-	protected static string _instanceId = Guid.NewGuid().ToString();
-
 	/// <summary>
 	/// Base key in memory full list
 	/// </summary>
