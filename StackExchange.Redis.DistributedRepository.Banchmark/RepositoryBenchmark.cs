@@ -8,6 +8,7 @@ public class RepositoryBenchmark
 {
 	IDistributedRepository<TestObjectModel> dr1 = Start();
 	IDistributedRepository<TestObjectModel> dr2 = Start();
+
 	TestObjectModel tom = new TestObjectModel()
 	{
 		Name = "Test",

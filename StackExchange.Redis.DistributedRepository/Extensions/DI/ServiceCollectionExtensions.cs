@@ -49,7 +49,7 @@ public static class ServiceCollectionExtensions
 		return services;
 	}
 
-	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, string indexName, Expression<Func<T, object>> expression)
+	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, string indexName, Expression<Func<T, object>> expression) where T : class
 	{
 		services.AddSingleton<RedisIndexer<T>>((provider) =>
 		{
@@ -58,7 +58,7 @@ public static class ServiceCollectionExtensions
 		return services;
 	}
 
-	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, Expression<Func<T, object>> expression)
+	public static IServiceCollection AddIndexer<T>(this IServiceCollection services, Expression<Func<T, object>> expression) where T : class
 	{
 		services.AddSingleton<RedisIndexer<T>>((provider) =>
 		{

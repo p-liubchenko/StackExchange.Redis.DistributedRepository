@@ -29,17 +29,18 @@ dotnet add package PL.StackExchange.Redis.DistributedRepository
 
 ```cs
 builder.Services.AddMemoryCache();
-builder.Services.AddStackExchangeRedisExtensions<NewtonsoftSerializer>(redisConfig);
-builder.Services.AddDistributedRepository<MyEntity>(x => x.Id);
+builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost:6379"));
+builder.Services.AddDistributedRepository<MyEntity>(x => x.Id, keyPrefix: "<optional global key prefix can be null>");
+builder.Services.AddDistributedBackedRepository<MyEntity>(x => x.Id, keyPrefix: "<optional global key prefix can be null>");
 ```
 2. Use the repository
 
 ```cs
 public class MyService
 {
-    private readonly DistributedHashRepository<MyEntity> _repository;
+    private readonly IDistributedRepository<MyEntity> _repository;
 
-    public MyService(DistributedHashRepository<MyEntity> repository)
+    public MyService(IDistributedRepository<MyEntity> repository)
     {
         _repository = repository;
     }

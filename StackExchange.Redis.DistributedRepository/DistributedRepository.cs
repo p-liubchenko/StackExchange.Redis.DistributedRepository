@@ -43,7 +43,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	protected readonly IRepositoryMetrics? _metrics;
 	protected readonly ILogger<DistributedRepository<T>>? _logger;
 	protected readonly IEnumerable<RedisIndexer<T>>? _indexers;
-
+	protected RedisChannel _busChannel;
 	public DistributedRepository(
 		IConnectionMultiplexer connection,
 		Func<T, string> keySelector,
@@ -57,7 +57,9 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		_bus = connection.GetSubscriber();
 		if (_bus.Ping() == TimeSpan.Zero)
 			throw new Exception("Redis bus is not available");
-		_bus.Subscribe(RedisChannel.Literal(BaseKey), ItemUpdatedHandler);
+		_busChannel = RedisChannel.Literal(BaseKey);
+
+		_bus.Subscribe(_busChannel, ItemUpdatedHandler);
 		_metrics = metrics;
 		_logger = logger;
 		_indexers = indexers;
@@ -83,7 +85,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
-			_bus.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
+			_bus.Publish(_busChannel, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -228,7 +230,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		if (poped is null)
 			return null;
 		await RemoveRedis(key);
-		_bus.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		_bus.Publish(_busChannel, GenerateMessage(MessageType.Deleted, key));
 		return poped;
 	}
 
@@ -422,7 +424,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 		RedisResult? result = _database.ScriptEvaluate($"return redis.call('keys', '{pattern}')");
 
-		if (result.Type == ResultType.Array)
+		if (result is not null && result.Type == ResultType.Array)
 		{
 			foreach (var redisValue in (RedisResult[])result)
 			{

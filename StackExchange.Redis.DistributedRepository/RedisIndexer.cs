@@ -7,7 +7,7 @@ namespace StackExchange.Redis.DistributedRepository;
 /// <summary>
 /// Redis indexer for managing Redis keys.
 /// </summary>
-public class RedisIndexer<T>
+public class RedisIndexer<T> where T : class
 {
 	public Func<T, object> IndexSelector { get; set; }
 	internal Expression<Func<T, object>> Index { get; set; }
@@ -24,7 +24,7 @@ public class RedisIndexer<T>
 		IndexSelector = Index.Compile();
 	}
 
-	public static void ValidateIndexerExpression<T>(Expression<Func<T, object>> expr)
+	public static void ValidateIndexerExpression(Expression<Func<T, object>> expr)
 	{
 		var body = expr.Body is UnaryExpression unary && unary.NodeType == ExpressionType.Convert
 			? unary.Operand
