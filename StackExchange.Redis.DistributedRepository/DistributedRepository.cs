@@ -8,6 +8,7 @@ using StackExchange.Redis.DistributedRepository.Indexing;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
 using StackExchange.Redis.Extensions.Core.Abstractions;
+using StackExchange.Redis.Extensions.Core.Implementations;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
@@ -39,24 +40,26 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// </summary>
 	public readonly Func<T, string> KeySelector;
 
-	private readonly IDatabase _database;
-	private readonly IRedisDatabase _redisDatabase;
-	private readonly ISubscriber _subscriber;
-	private readonly IRepositoryMetrics? _metrics;
-	private readonly ILogger<DistributedRepository<T>>? _logger;
-	private readonly IEnumerable<RedisIndexer<T>>? _indexers;
+	protected readonly IDatabase _database;
+	protected readonly ISubscriber _bus;
+	protected readonly IRepositoryMetrics? _metrics;
+	protected readonly ILogger<DistributedRepository<T>>? _logger;
+	protected readonly IEnumerable<RedisIndexer<T>>? _indexers;
 
 	public DistributedRepository(
-		IRedisClient redis,
+		IConnectionMultiplexer connection,
 		Func<T, string> keySelector,
 		IRepositoryMetrics? metrics = null,
 		ILogger<DistributedRepository<T>>? logger = null,
-		IEnumerable<RedisIndexer<T>>? indexers = null)
+		IEnumerable<RedisIndexer<T>>? indexers = null,
+		string? keyPrefix = null)
 	{
-		_redisDatabase = redis.GetDefaultDatabase();
-		_database = _redisDatabase.Database;
-		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
-		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
+		_globalPrefix = keyPrefix;
+		_database = connection.GetDatabase();
+		_bus = connection.GetSubscriber();
+		if(_bus.Ping() == TimeSpan.Zero)
+			throw new Exception("Redis bus is not available");
+		_bus.Subscribe(RedisChannel.Literal(BaseKey), ItemUpdatedHandler);
 		_metrics = metrics;
 		_logger = logger;
 		_indexers = indexers;
@@ -82,7 +85,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
-			_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
+			_bus.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -161,7 +164,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	{
 		foreach (var indexer in _indexers)
 		{
-			transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{indexer.IndexSelector.Invoke(item)?.ToString()}", itemKey);
+			transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{IndexKeyHelper.NormalizeValue(indexer.IndexSelector.Invoke(item))}", itemKey);
 		}
 		return transaction;
 	}
@@ -227,7 +230,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		if (poped is null)
 			return null;
 		await RemoveRedis(key);
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		_bus.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
 		return poped;
 	}
 
@@ -362,7 +365,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			IEnumerable<string>? ids = null;
 			foreach (var condition in indexConditions)
 			{
-				string? key = $"{IndexBaseKey}:{condition.IndexName}:{condition.Value}";
+				string? key = $"{IndexBaseKey}:{condition.IndexName}:{IndexKeyHelper.NormalizeValue(condition.Value)}";
 				RedisValue[]? members = await _database.SetMembersAsync(key);
 				IEnumerable<string>? currentIds = members.Select(m => m.ToString());
 
@@ -373,7 +376,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 				return Enumerable.Empty<T>();
 			IEnumerable<T>? items = ids.Select(id => Get(id));
 
-			return items.Where(x => x is not null).Select(x => x!);
+			return items.Where(x => x is not null).Where(predicate.Compile()).Select(x => x!);
 		}
 		catch (Exception ex)
 		{
@@ -399,7 +402,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			transaction.KeyDeleteAsync(BaseKeyTracker);
 			PurgeIndex(ref transaction);
 			await transaction.ExecuteAsync();
-			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			await _bus.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
 		}
 		catch (Exception ex)
 		{
@@ -417,17 +420,15 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		// Delete all index values and their corresponding sets
 		if (_indexers is null)
 			return;
+		string pattern = $"{_globalPrefix}{IndexBaseKey}:*";
 
-		foreach (var indexer in _indexers)
+		RedisResult? result = _database.ScriptEvaluate($"return redis.call('keys', '{pattern}')");
+
+		if (result.Type == ResultType.Array)
 		{
-			string indexPattern = $"{IndexBaseKey}:{indexer.Name}:*";
-			string[] keys = _database.ScriptEvaluate(
-				"return redis.call('keys', ARGV[1])",
-				values: new RedisValue[] { indexPattern }
-			).ToDictionary().Select(x=>x.Key).ToArray();
-
-			foreach (var key in keys)
+			foreach (var redisValue in (RedisResult[])result)
 			{
+				string key = (string)redisValue;
 				transaction.KeyDeleteAsync(key);
 			}
 		}

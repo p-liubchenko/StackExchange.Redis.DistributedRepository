@@ -15,10 +15,26 @@ class IndexConditionExtractor<T> : ExpressionVisitor
 	{
 		if (node.NodeType == ExpressionType.Equal)
 		{
-			if (node.Left is MemberExpression memberExpr &&
-				node.Right is ConstantExpression constExpr)
+			MemberExpression? leftMember = UnwrapToMember(node.Left);
+			MemberExpression? rightMember = UnwrapToMember(node.Right);
+
+			ConstantExpression? constExpr = null;
+			MemberExpression? memberExpr = null;
+
+			if (leftMember != null && node.Right is ConstantExpression rightConst)
 			{
-				var name = memberExpr.Member.Name;
+				memberExpr = leftMember;
+				constExpr = rightConst;
+			}
+			else if (rightMember != null && node.Left is ConstantExpression leftConst)
+			{
+				memberExpr = rightMember;
+				constExpr = leftConst;
+			}
+
+			if (memberExpr != null && constExpr != null)
+			{
+				string? name = memberExpr.Member.Name;
 
 				if (_indexers.ContainsKey(name))
 				{
@@ -32,5 +48,15 @@ class IndexConditionExtractor<T> : ExpressionVisitor
 		}
 
 		return base.VisitBinary(node);
+	}
+
+	private static MemberExpression? UnwrapToMember(Expression expression)
+	{
+		return expression switch
+		{
+			MemberExpression m => m,
+			UnaryExpression u when u.Operand is MemberExpression m => m,
+			_ => null
+		};
 	}
 }

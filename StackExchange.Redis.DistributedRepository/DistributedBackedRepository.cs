@@ -39,24 +39,21 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	public readonly Func<T, string> KeySelector;
 
 	private readonly IDatabase _database;
-	private readonly IRedisDatabase _redisDatabase;
 	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
 	private readonly IRepositoryMetrics? _metrics;
 	private readonly ILogger<DistributedBackedRepository<T>>? _logger;
 
 	public DistributedBackedRepository(
-		IRedisClient redis,
+		IConnectionMultiplexer redis,
 		IMemoryCache memoryCache,
 		Func<T, string> keySelector,
 		IRepositoryMetrics? metrics = null,
 		ILogger<DistributedBackedRepository<T>>? logger = null,
-		IEnumerable<RedisIndexer<T>>? indexers = null) : base(redis, keySelector, metrics, logger, indexers)
+		IEnumerable<RedisIndexer<T>>? indexers = null,
+		string? keyPrefix = null) : base(redis, keySelector, metrics, logger, indexers, keyPrefix: keyPrefix)
 	{
-		_redisDatabase = redis.GetDefaultDatabase();
-		_database = _redisDatabase.Database;
-		_subscriber = _redisDatabase.Database.Multiplexer.GetSubscriber();
-		_subscriber.Subscribe(BaseKey, ItemUpdatedHandler);
+		
 		_memoryCache = memoryCache;
 		_metrics = metrics;
 		_logger = logger;

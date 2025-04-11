@@ -1,4 +1,6 @@
 using System.Linq.Expressions;
+using System.Reflection;
+using StackExchange.Redis.DistributedRepository.Indexing;
 
 namespace StackExchange.Redis.DistributedRepository;
 
@@ -20,5 +22,20 @@ public class RedisIndexer<T>
 		Name = name;
 		Index = expression;
 		IndexSelector = Index.Compile();
+	}
+
+	public static void ValidateIndexerExpression<T>(Expression<Func<T, object>> expr)
+	{
+		var body = expr.Body is UnaryExpression unary && unary.NodeType == ExpressionType.Convert
+			? unary.Operand
+			: expr.Body;
+
+		if (body is not MemberExpression memberExpr)
+			throw new InvalidOperationException("Indexer must be a member access.");
+
+		var memberType = ((PropertyInfo?)memberExpr.Member)?.PropertyType ?? memberExpr.Type;
+
+		if (!IndexKeyHelper.IsIndexableType(memberType))
+			throw new InvalidOperationException($"Cannot index member '{memberExpr.Member.Name}' of type '{memberType.Name}' — not supported.");
 	}
 }

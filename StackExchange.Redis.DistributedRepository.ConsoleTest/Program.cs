@@ -50,7 +50,8 @@ internal class Program
 							{
                                 Name = Random.Shared.Next(0, 2) == 0 ? "tester" : "worker",
 								Description = "Test Description",
-								DecVal = 1.1m
+								DecVal = 1.1m,
+								ObjType = (TestEnum)Random.Shared.Next(0, 5),
 							};
 							repo1.Add(obj);
 							break;
@@ -58,10 +59,10 @@ internal class Program
 							repo1.Purge();
 							break;
 						case ConsoleKey.W:
-							var found = repo1.WhereAsync(x => x.Name == "worker");
+							var found = repo1.WhereAsync(x => x.Name == "worker" && x.Created.Year == 2025 && x.ObjType == TestEnum.None);
 							foreach (var item in found.Result)
 							{
-								Console.WriteLine($"Found: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal}");
+								Console.WriteLine($"Found: {item.Id} Name: {item.Name} Description: {item.Description} DecVal: {item.DecVal} OnjType: {item.ObjType}");
 							}
 							break;
 						case ConsoleKey.Escape:
@@ -83,15 +84,22 @@ internal class Program
 		services.AddMemoryCache();
 		services.AddLogging();
 		services.AddScoped<IRepositoryMetrics, StringRepositoryMetrics>();
-
-		services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
+		services.AddSingleton<IConnectionMultiplexer>((provider) =>
 		{
-			ConnectionString = configuration.GetConnectionString("redis"),
-			Database = 0,
-			KeyPrefix = "local:"
+			var config = configuration.GetConnectionString("redis");
+			return ConnectionMultiplexer.Connect(config);
 		});
+		//services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
+		//{
+		//	ConnectionString = configuration.GetConnectionString("redis"),
+		//	Database = 0,
+		//	KeyPrefix = "local:"
+		//});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		services.AddIndexer<TestObjectModel>(x=>x.Name);
+		services.AddIndexer<TestObjectModel>(x=>x.Created.Date.Year);
+		services.AddIndexer<TestObjectModel>(x=>x.Created.Date.Month);
+		services.AddIndexer<TestObjectModel>(x=>x.ObjType);
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
 		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
 		return repo;
