@@ -3,7 +3,6 @@ using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using StackExchange.Redis.Extensions.Core.Abstractions;
 
 namespace StackExchange.Redis.DistributedRepository.Extensions.DI;
 public static class ServiceCollectionExtensions

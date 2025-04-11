@@ -6,7 +6,6 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using StackExchange.Redis.Extensions.Core.Abstractions;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
@@ -53,7 +52,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		IEnumerable<RedisIndexer<T>>? indexers = null,
 		string? keyPrefix = null) : base(redis, keySelector, metrics, logger, indexers, keyPrefix: keyPrefix)
 	{
-		
+
 		_memoryCache = memoryCache;
 		_metrics = metrics;
 		_logger = logger;

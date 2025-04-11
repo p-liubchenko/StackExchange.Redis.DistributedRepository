@@ -7,8 +7,6 @@ using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Indexing;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using StackExchange.Redis.Extensions.Core.Abstractions;
-using StackExchange.Redis.Extensions.Core.Implementations;
 using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
@@ -57,7 +55,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		_globalPrefix = keyPrefix;
 		_database = connection.GetDatabase();
 		_bus = connection.GetSubscriber();
-		if(_bus.Ping() == TimeSpan.Zero)
+		if (_bus.Ping() == TimeSpan.Zero)
 			throw new Exception("Redis bus is not available");
 		_bus.Subscribe(RedisChannel.Literal(BaseKey), ItemUpdatedHandler);
 		_metrics = metrics;
@@ -175,7 +173,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		{
 			IndexRedis(ref transaction, item, KeySelector.Invoke(item));
 		}
-		
+
 		return transaction;
 	}
 

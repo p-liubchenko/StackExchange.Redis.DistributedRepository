@@ -2,7 +2,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis.DistributedRepository.ConsoleTest.Models;
 using StackExchange.Redis.DistributedRepository.Extensions.DI;
-using StackExchange.Redis.Extensions.System.Text.Json;
 
 namespace StackExchange.Redis.DistributedRepository.ConsoleTest;
 
@@ -48,7 +47,7 @@ internal class Program
 						case ConsoleKey.Enter:
 							var obj = new TestObjectModel()
 							{
-                                Name = Random.Shared.Next(0, 2) == 0 ? "tester" : "worker",
+								Name = Random.Shared.Next(0, 2) == 0 ? "tester" : "worker",
 								Description = "Test Description",
 								DecVal = 1.1m,
 								ObjType = (TestEnum)Random.Shared.Next(0, 5),
@@ -96,10 +95,10 @@ internal class Program
 		//	KeyPrefix = "local:"
 		//});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
-		services.AddIndexer<TestObjectModel>(x=>x.Name);
-		services.AddIndexer<TestObjectModel>(x=>x.Created.Date.Year);
-		services.AddIndexer<TestObjectModel>(x=>x.Created.Date.Month);
-		services.AddIndexer<TestObjectModel>(x=>x.ObjType);
+		services.AddIndexer<TestObjectModel>(x => x.Name);
+		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Year);
+		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Month);
+		services.AddIndexer<TestObjectModel>(x => x.ObjType);
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
 		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
 		return repo;

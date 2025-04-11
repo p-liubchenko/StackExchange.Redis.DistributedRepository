@@ -1,9 +1,7 @@
-﻿using System.Xml;
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis.DistributedRepository.Extensions.DI;
-using StackExchange.Redis.Extensions.System.Text.Json;
 
 namespace StackExchange.Redis.DistributedRepository.Banchmark;
 public class RepositoryBenchmark
@@ -86,13 +84,8 @@ public class RepositoryBenchmark
 		ServiceCollection services = new ServiceCollection();
 		services.AddMemoryCache();
 		services.AddLogging();
+		services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(configuration.GetConnectionString("redis")));
 
-		services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
-		{
-			ConnectionString = configuration.GetConnectionString("redis"),
-			Database = 0,
-			KeyPrefix = "TestPrefix:"
-		});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		IServiceProvider serviceProvider = services.BuildServiceProvider();
 		var repo = serviceProvider.GetRequiredService<IDistributedRepository<TestObjectModel>>();
