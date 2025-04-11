@@ -85,15 +85,10 @@ internal class Program
 		services.AddScoped<IRepositoryMetrics, StringRepositoryMetrics>();
 		services.AddSingleton<IConnectionMultiplexer>((provider) =>
 		{
-			var config = configuration.GetConnectionString("redis");
-			return ConnectionMultiplexer.Connect(config);
+			string? redis_cs = configuration.GetConnectionString("redis");
+			if (string.IsNullOrEmpty(redis_cs)) throw new Exception("Redis connection string should not be null");
+			return ConnectionMultiplexer.Connect(redis_cs);
 		});
-		//services.AddStackExchangeRedisExtensions<SystemTextJsonSerializer>(new Redis.Extensions.Core.Configuration.RedisConfiguration()
-		//{
-		//	ConnectionString = configuration.GetConnectionString("redis"),
-		//	Database = 0,
-		//	KeyPrefix = "local:"
-		//});
 		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
 		services.AddIndexer<TestObjectModel>(x => x.Name);
 		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Year);

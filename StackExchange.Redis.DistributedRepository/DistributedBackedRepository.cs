@@ -14,16 +14,6 @@ namespace StackExchange.Redis.DistributedRepository;
 
 public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistributedCache where T : class
 {
-	protected static string InstanceId = Guid.NewGuid().ToString();
-
-	/// <summary>
-	/// Base key for the repository distributed object lock
-	/// </summary>
-	protected string BaseKeyLock
-	{
-		get => $"{BaseKey}:lock";
-	}
-
 	/// <summary>
 	/// Base key in memory full list
 	/// </summary>
@@ -32,16 +22,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		get => $"{BaseKey}:list";
 	}
 
-	/// <summary>
-	/// Key selector for the repository's entity
-	/// </summary>
-	public readonly Func<T, string> KeySelector;
-
-	private readonly IDatabase _database;
-	private readonly ISubscriber _subscriber;
 	private readonly IMemoryCache _memoryCache;
-	private readonly IRepositoryMetrics? _metrics;
-	private readonly ILogger<DistributedBackedRepository<T>>? _logger;
 
 	public DistributedBackedRepository(
 		IConnectionMultiplexer redis,
@@ -54,9 +35,6 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	{
 
 		_memoryCache = memoryCache;
-		_metrics = metrics;
-		_logger = logger;
-		KeySelector = keySelector;
 		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
 
@@ -80,7 +58,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
 			MemoryAdd(item, fqk);
-			_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
+			_bus.Publish(_busChannel, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -120,8 +98,10 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		}
 	}
 
-	protected void MemoryAdd(T item, string fqk)
+	protected void MemoryAdd(T? item, string fqk)
 	{
+		if (item is null)
+			return;
 		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
 		if (items is null)
 		{
@@ -156,7 +136,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 			return null;
 		await RemoveRedis(key);
 		RemoveMemory(key);
-		_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Deleted, key));
+		_bus.Publish(_busChannel, GenerateMessage(MessageType.Deleted, key));
 		return poped;
 	}
 
@@ -219,24 +199,26 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task<T?> GetAsync(string Key)
+	public new async Task<T?> GetAsync(string? key)
 	{
-		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
+		if (key is null)
+			return null;
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: key);
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+			if (_memoryCache.TryGetValue(this.FQK(key), out T? item))
 			{
 				return item;
 			}
 
-			if (_database.HashExists(BaseKey, Key))
+			if (_database.HashExists(BaseKey, key))
 			{
-				string? value = await _database.HashGetAsync(BaseKey, Key);
+				string? value = await _database.HashGetAsync(BaseKey, key);
 				if (string.IsNullOrEmpty(value))
 					return null;
 				item = JsonSerializer.Deserialize<T>(value);
-				_memoryCache.Set(this.FQK(Key), item);
+				_memoryCache.Set(this.FQK(key), item);
 				return item;
 			}
 		}
@@ -266,7 +248,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task<IEnumerable<T>> GetAsync()
+	public new async Task<IEnumerable<T>?> GetAsync()
 	{
 		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
 		if (!fetchedFromMemory || items is null)
@@ -287,7 +269,8 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 				_memoryCache.Set(this.FQK(item.Key), item.Value);
 			}
-			return values.Where(x => x.Value is not null).Select(x => x.Value);
+			IEnumerable<T>? result = values.Select(x => x.Value).Where(x => x is not null);
+			return result;
 		}
 
 		return items;
@@ -359,7 +342,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 			transaction.KeyDeleteAsync(BaseKey);
 			transaction.KeyDeleteAsync(BaseKeyTracker);
 			await transaction.ExecuteAsync();
-			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
+			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Purged, null));
 			MemoryPurge();
 			await RebakeAll();
 		}
@@ -433,7 +416,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 		if (message is null)
 			return;
-		if (message.i == InstanceId)
+		if (message.i == _instanceId)
 			return;
 
 		switch (message.type)
