@@ -83,7 +83,6 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
 			_subscriber.Publish(BaseKey, GenerateMessage(MessageType.Created, key));
-			await IndexRedis(key, item);
 			return result;
 		}
 		catch (Exception ex)
@@ -119,6 +118,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 				string key = KeySelector.Invoke(item);
 				transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
 				transaction.SetAddAsync(BaseKeyTracker, key);
+				IndexRangeRedis(ref transaction, range);
 			}
 			await transaction.ExecuteAsync();
 		}
@@ -142,6 +142,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			ITransaction? transaction = _database.CreateTransaction();
 			transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
 			transaction.SetAddAsync(BaseKeyTracker, key);
+			IndexRedis(ref transaction, item, key);
 			await transaction.ExecuteAsync();
 			return item;
 		}
@@ -154,6 +155,25 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		{
 			_metrics?.ObserveDuration("repo.add.redis", sw.Elapsed);
 		}
+	}
+
+	protected ITransaction IndexRedis(ref ITransaction transaction, T item, string itemKey)
+	{
+		foreach (var indexer in _indexers)
+		{
+			transaction.SetAddAsync($"{IndexBaseKey}:{indexer.Name}:{indexer.IndexSelector.Invoke(item)?.ToString()}", itemKey);
+		}
+		return transaction;
+	}
+
+	protected ITransaction IndexRangeRedis(ref ITransaction transaction, IEnumerable<T> items)
+	{
+		foreach (var item in items)
+		{
+			IndexRedis(ref transaction, item, KeySelector.Invoke(item));
+		}
+		
+		return transaction;
 	}
 
 	protected async Task IndexRedis(string itemKey, T item)
@@ -377,6 +397,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			ITransaction transaction = _database.CreateTransaction();
 			transaction.KeyDeleteAsync(BaseKey);
 			transaction.KeyDeleteAsync(BaseKeyTracker);
+			PurgeIndex(ref transaction);
 			await transaction.ExecuteAsync();
 			await _subscriber.PublishAsync(BaseKey, GenerateMessage(MessageType.Purged, null));
 		}
@@ -391,7 +412,26 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			activity?.Stop();
 		}
 	}
+	public virtual void PurgeIndex(ref ITransaction transaction)
+	{
+		// Delete all index values and their corresponding sets
+		if (_indexers is null)
+			return;
 
+		foreach (var indexer in _indexers)
+		{
+			string indexPattern = $"{IndexBaseKey}:{indexer.Name}:*";
+			string[] keys = _database.ScriptEvaluate(
+				"return redis.call('keys', ARGV[1])",
+				values: new RedisValue[] { indexPattern }
+			).ToDictionary().Select(x=>x.Key).ToArray();
+
+			foreach (var key in keys)
+			{
+				transaction.KeyDeleteAsync(key);
+			}
+		}
+	}
 	/// <inheritdoc/>
 	public virtual async Task Rebuild()
 	{

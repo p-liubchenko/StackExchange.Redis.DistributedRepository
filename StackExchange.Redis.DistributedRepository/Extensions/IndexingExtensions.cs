@@ -7,15 +7,12 @@ internal static class IndexingExtensions
 	{
 		Expression body = expression.Body;
 
-		// Unwrap conversions (e.g., boxing for value types)
 		if (body is UnaryExpression unary && unary.NodeType == ExpressionType.Convert)
 			body = unary.Operand;
 
-		// Handle simple member access: x => x.Property
 		if (body is MemberExpression member)
 			return member.Member.Name;
 
-		// Handle nested member access: x => x.Sub.Property
 		if (body is MemberExpression nested)
 			return GetFullPropertyPath(nested);
 
