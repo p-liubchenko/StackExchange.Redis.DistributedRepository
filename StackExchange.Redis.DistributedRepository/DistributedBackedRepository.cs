@@ -6,13 +6,12 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistributedCache where T : class
+public class DistributedBackedRepository<T> : DistributedRepository<T> where T : class
 {
 	/// <summary>
 	/// Base key in memory full list
@@ -212,15 +211,13 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 				return item;
 			}
 
-			if (_database.HashExists(BaseKey, key))
-			{
-				string? value = await _database.HashGetAsync(BaseKey, key);
-				if (string.IsNullOrEmpty(value))
-					return null;
-				item = JsonSerializer.Deserialize<T>(value);
-				_memoryCache.Set(this.FQK(key), item);
-				return item;
-			}
+			string? value = await _database.HashGetAsync(BaseKey, key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			item = JsonSerializer.Deserialize<T>(value);
+			_memoryCache.Set(this.FQK(key), item);
+			return item;
+
 		}
 		catch (Exception ex)
 		{
@@ -452,39 +449,4 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 				break;
 		}
 	}
-
-	#region IDistributedCache
-	byte[]? IDistributedCache.Get(string key)
-	{
-		T? found = Get(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	async Task<byte[]?> IDistributedCache.GetAsync(string key, CancellationToken token)
-	{
-		T? found = await GetAsync(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	void IDistributedCache.Set(string key, byte[] value, DistributedCacheEntryOptions options)
-	{
-		Add(Deserialize<T>(value));
-	}
-	async Task IDistributedCache.SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token)
-	{
-		await AddAsync(Deserialize<T>(value));
-	}
-	void IDistributedCache.Refresh(string key) => throw new NotImplementedException();
-	Task IDistributedCache.RefreshAsync(string key, CancellationToken token) => throw new NotImplementedException();
-	void IDistributedCache.Remove(string key)
-	{
-		Remove(key);
-	}
-	async Task IDistributedCache.RemoveAsync(string key, CancellationToken token)
-	{
-		await RemoveAsync(key);
-	}
-	#endregion
 }

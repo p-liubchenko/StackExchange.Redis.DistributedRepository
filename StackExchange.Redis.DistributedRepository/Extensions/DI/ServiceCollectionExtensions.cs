@@ -67,15 +67,4 @@ public static class ServiceCollectionExtensions
 		});
 		return services;
 	}
-
-	public static IServiceCollection AddDistributedCache<T>(this IServiceCollection services, Func<T, string> keySelector, string keyPrefix) where T : class
-	{
-		services.AddScoped<IDistributedCache>((provider) =>
-		{
-			IConnectionMultiplexer redis = provider.GetRequiredService<IConnectionMultiplexer>();
-			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
-			return new DistributedBackedRepository<T>(redis, memoryCache, keySelector, keyPrefix: keyPrefix);
-		});
-		return services;
-	}
 }
