@@ -114,7 +114,6 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-
 			ITransaction transaction = _database.CreateTransaction();
 			foreach (var item in range)
 			{
@@ -231,18 +230,33 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		var poped = await GetAsync(key);
 		if (poped is null)
 			return null;
-		await RemoveRedis(key);
+		await RemoveRedis(poped);
 		_bus.Publish(_busChannel, GenerateMessage(MessageType.Deleted, key));
 		return poped;
 	}
 
-	protected async Task RemoveRedis(string key)
+	protected async Task RemoveRedis(T item)
 	{
+		string key = KeySelector.Invoke(item);
 		ITransaction transaction = _database.CreateTransaction();
 		transaction.HashDeleteAsync(BaseKey, key);
 		transaction.SetRemoveAsync(BaseKeyTracker, key);
+		foreach (string indexKey in GetIndexes(item))
+		{
+			transaction.SetRemoveAsync(indexKey, key);
+
+		}
 		await transaction.ExecuteAsync();
 	}
+
+	protected IEnumerable<string> GetIndexes(T item)
+	{
+		if (_indexers is null || !_indexers.Any())
+			return Enumerable.Empty<string>();
+		IEnumerable<string> indexKeys = _indexers.Select(index => IndexKey(index.Name, index.IndexSelector.Invoke(item)));
+		return indexKeys;
+	}
+
 	#endregion
 
 	/// <inheritdoc/>
@@ -422,7 +436,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		// Delete all index values and their corresponding sets
 		if (_indexers is null)
 			return;
-		string pattern = $"{_globalPrefix}{IndexBaseKey}:*";
+		string pattern = $"{IndexBaseKey}:*";
 
 		RedisResult? result = _database.ScriptEvaluate($"return redis.call('keys', '{pattern}')");
 
@@ -430,7 +444,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		{
 			foreach (RedisResult redisValue in (RedisResult[])result!)
 			{
-				if(redisValue is null) continue;
+				if (redisValue is null) continue;
 				string key = (string)redisValue!;
 				transaction.KeyDeleteAsync(key);
 			}
@@ -486,6 +500,9 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 			? $"{{ \"i\":\"{_instanceId}\", \"type\":{(int)messageType}}}"
 			: $"{{ \"i\":\"{_instanceId}\", \"type\":{(int)messageType},\"item\":\"{resourceKey}\"}}";
 	}
+
+	protected string IndexKey(string name, object value) =>
+		$"{IndexBaseKey}:{name}:{IndexKeyHelper.NormalizeValue(value)}";
 
 	#region IDistributedCache
 	byte[]? IDistributedCache.Get(string key)

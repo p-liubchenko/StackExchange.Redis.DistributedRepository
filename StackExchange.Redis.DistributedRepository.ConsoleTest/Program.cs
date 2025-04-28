@@ -54,8 +54,13 @@ internal class Program
 							};
 							repo1.Add(obj);
 							break;
-						case ConsoleKey.C:
+						case ConsoleKey.P:
 							repo1.Purge();
+							break;
+						case ConsoleKey.C:
+							Console.Write("Key to delete: ");
+							string? keyToDelete = Console.ReadLine();
+							repo1.Remove(keyToDelete);
 							break;
 						case ConsoleKey.W:
 							var found = repo1.WhereAsync(x => x.Name == "worker" && x.Created.Year == 2025 && x.ObjType == TestEnum.None);
