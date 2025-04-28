@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
@@ -6,13 +7,12 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistributedCache where T : class
+public class DistributedBackedRepository<T> : DistributedRepository<T> where T : class
 {
 	/// <summary>
 	/// Base key in memory full list
@@ -23,6 +23,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	private readonly IMemoryCache _memoryCache;
+	private readonly ConcurrentDictionary<string, T> _memDict = new();
 
 	public DistributedBackedRepository(
 		IConnectionMultiplexer redis,
@@ -35,13 +36,14 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	{
 
 		_memoryCache = memoryCache;
+		_memoryCache.Set(MemoryListKey, _memDict);
 		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
 
 	#region add
-	public new T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
+	public override T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
-	public new async Task<T> AddAsync(T item)
+	public override async Task<T> AddAsync(T item)
 	{
 		ArgumentNullException.ThrowIfNull(item);
 		string key = KeySelector.Invoke(item);
@@ -54,11 +56,9 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 		try
 		{
-
-			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
-			MemoryAdd(item, fqk);
-			_bus.Publish(_busChannel, GenerateMessage(MessageType.Created, key));
+			MemoryAdd(item);
+			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -76,7 +76,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	public new void AddRange(IEnumerable<T> range) =>
 		AddRangeAsync(range).GetAwaiter().GetResult();
 
-	public new async Task AddRangeAsync(IEnumerable<T> range)
+	public override async Task AddRangeAsync(IEnumerable<T> range)
 	{
 		await RedisAddRange(range);
 		MemoryAddRange(range);
@@ -84,52 +84,37 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 	protected void MemoryAddRange(IEnumerable<T> range)
 	{
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (items is null)
-		{
-			items = new List<T>();
-			_memoryCache.Set(MemoryListKey, items);
-		}
-		items.AddRange(range);
 		foreach (var item in range)
 		{
-			string key = KeySelector.Invoke(item);
-			_memoryCache.Set(this.FQK(key), item);
+			_memDict[KeySelector.Invoke(item)] = item;
 		}
 	}
 
-	protected void MemoryAdd(T? item, string fqk)
+	protected void MemoryAdd(T? item)
 	{
 		if (item is null)
 			return;
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (items is null)
-		{
-			items = new List<T>();
-			_memoryCache.Set(MemoryListKey, items);
-		}
-		items.Add(item);
-		_memoryCache.Set(fqk, item);
 
+		_memDict[KeySelector.Invoke(item)] = item;
 	}
 	#endregion
 
 	#region remove
-	public new T? Remove(T item)
+	public override T? Remove(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return Remove(key);
 	}
 
-	public new async Task<T?> RemoveAsync(T item)
+	public override async Task<T?> RemoveAsync(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return await RemoveAsync(key);
 	}
 
-	public new T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
+	public override T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
 
-	public new async Task<T?> RemoveAsync(string key)
+	public override async Task<T?> RemoveAsync(string key)
 	{
 		var poped = await GetAsync(key);
 		if (poped is null)
@@ -142,34 +127,27 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 	protected void RemoveMemory(string key)
 	{
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (items is null)
-			return;
-		items.RemoveAll(x => KeySelector.Invoke(x) == key);
-
-		_memoryCache.Remove(this.FQK(key));
+		_memDict.Remove(key, out _);
 	}
 	#endregion
 
 	/// <inheritdoc/>
-	public new T? Get(string Key)
+	public override T? Get(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
-			{
-				return item;
-			}
+			if (_memDict.TryGetValue(Key, out T? itemMemory))
+				return itemMemory;
 
 			if (_database.HashExists(BaseKey, Key))
 			{
 				string? value = _database.HashGet(BaseKey, Key);
 				if (string.IsNullOrEmpty(value))
 					return null;
-				item = JsonSerializer.Deserialize<T?>(value);
-				_memoryCache.Set(this.FQK(Key), item);
+				T item = JsonSerializer.Deserialize<T?>(value);
+				MemoryAdd(item);
 				return item;
 			}
 		}
@@ -188,7 +166,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new T GetOrAdd(string key, Func<T> factory)
+	public override T GetOrAdd(string key, Func<T> factory)
 	{
 		T? item = Get(key);
 		if (item is not null)
@@ -199,7 +177,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task<T?> GetAsync(string? key)
+	public override async Task<T?> GetAsync(string? key)
 	{
 		if (key is null)
 			return null;
@@ -207,20 +185,16 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(this.FQK(key), out T? item))
-			{
-				return item;
-			}
+			if (_memDict.TryGetValue(key, out T? itemMemory))
+				return itemMemory;
 
-			if (_database.HashExists(BaseKey, key))
-			{
-				string? value = await _database.HashGetAsync(BaseKey, key);
-				if (string.IsNullOrEmpty(value))
-					return null;
-				item = JsonSerializer.Deserialize<T>(value);
-				_memoryCache.Set(this.FQK(key), item);
-				return item;
-			}
+			string? value = await _database.HashGetAsync(BaseKey, key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			T? item = JsonSerializer.Deserialize<T>(value);
+			MemoryAdd(item);
+			return item;
+
 		}
 		catch (Exception ex)
 		{
@@ -237,7 +211,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
+	public override async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
 	{
 		T? item = await GetAsync(key);
 		if (item is not null)
@@ -248,60 +222,39 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task<IEnumerable<T>?> GetAsync()
+	public override async Task<IEnumerable<T>> GetAsync()
 	{
-		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (!fetchedFromMemory || items is null)
+		if (_memDict.Values.Any())
 		{
-			HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
-
-			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
-
-			_memoryCache.Set(
-				MemoryListKey,
-				values.Values.ToList()
-			);
-
-			foreach (KeyValuePair<string, T?> item in values)
-			{
-				if (item.Value is null)
-					continue;
-
-				_memoryCache.Set(this.FQK(item.Key), item.Value);
-			}
-			IEnumerable<T>? result = values.Select(x => x.Value).Where(x => x is not null);
-			return result;
+			return _memDict.Values;
 		}
+		IEnumerable<T>? values = await base.GetAsync();
 
-		return items;
+		MemoryAddRange(values);
+
+		return values;
 	}
 
 	/// <inheritdoc/>
-	public new IEnumerable<T> Get()
+	public override IEnumerable<T> Get()
 	{
-		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (!fetchedFromMemory || items is null)
-		{
-			HashEntry[]? objects = _database.HashGetAll(BaseKey);
+		if (_memDict.Values.Any())
+			return _memDict.Values;
 
-			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+		IEnumerable<T> values = base.Get();
 
-			_memoryCache.Set(
-				MemoryListKey,
-				values.Values.ToList()
-			);
+		_memoryCache.Set(
+			MemoryListKey,
+			new ConcurrentDictionary<string, T>(values.ToDictionary(x => KeySelector.Invoke(x!), x => x))
+		);
 
-			foreach (KeyValuePair<string, T?> item in values)
-			{
-				if (item.Value is null)
-					continue;
+		return values.Where(x => x is not null)?? Enumerable.Empty<T>();
 
-				_memoryCache.Set(this.FQK(item.Key), item.Value);
-			}
-			return values.Where(x => x.Value is not null).Select(x => x.Value);
-		}
+	}
 
-		return items;
+	protected bool MemoryTryGet(string key, T? item = null)
+	{
+		return _memDict.TryGetValue(key, out item);
 	}
 
 	/// <inheritdoc/>
@@ -316,7 +269,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 			foreach (var item in keys)
 			{
-				MemoryAdd(await GetAsync(item), this.FQK(item.ToString()));
+				MemoryAdd(await GetAsync(item));
 			}
 		}
 		catch (Exception ex)
@@ -332,16 +285,13 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 	}
 
 	/// <inheritdoc/>
-	public new async Task Purge()
+	public override async Task Purge()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.purge");
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			ITransaction transaction = _database.CreateTransaction();
-			transaction.KeyDeleteAsync(BaseKey);
-			transaction.KeyDeleteAsync(BaseKeyTracker);
-			await transaction.ExecuteAsync();
+			await base.Purge();
 			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Purged, null));
 			MemoryPurge();
 			await RebakeAll();
@@ -360,22 +310,11 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 	public void MemoryPurge()
 	{
-		List<T>? items = _memoryCache.Get<List<T>>(MemoryListKey);
-		if (items is null)
-			return;
-		foreach (var item in items)
-		{
-			_memoryCache.Remove(this.FQK(KeySelector.Invoke(item)));
-		}
-
-		_memoryCache.Set(
-			MemoryListKey,
-			new List<T>()
-		);
+		_memDict.Clear();
 	}
 
 	/// <inheritdoc/>
-	public new async Task Rebuild()
+	public override async Task Rebuild()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebuild");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -395,7 +334,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 
 			foreach (RedisValue key in keys)
 			{
-				MemoryAdd(await GetAsync(key), this.FQK(key.ToString()));
+				MemoryAdd(await GetAsync(key));
 			}
 		}
 		catch (Exception ex)
@@ -410,7 +349,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		}
 	}
 
-	protected new virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
+	protected override void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
 	{
 		Message? message = JsonSerializer.Deserialize<Message>(value.ToString());
 
@@ -424,16 +363,16 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 			case MessageType.Created:
 				if (string.IsNullOrEmpty(message.item))
 					return;
-				T? item = Get(message.item);
-				if (item is null) return;
-				MemoryAdd(item, this.FQK(message.item));
+				T? created = Get(message.item);
+				if (created is null) return;
+				MemoryAdd(created);
 				break;
 			case MessageType.Updated:
 				if (string.IsNullOrEmpty(message.item))
 					return;
-				T? item2 = Get(message.item);
-				if (item2 is null) return;
-				_memoryCache.Set(this.FQK(message.item), item2);
+				T? updated = Get(message.item);
+				if (updated is null) return;
+				MemoryAdd(updated);
 				break;
 			case MessageType.Deleted:
 				if (string.IsNullOrEmpty(message.item))
@@ -441,50 +380,10 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 				RemoveMemory(message.item);
 				break;
 			case MessageType.Purged:
-				List<string>? keys = _memoryCache.Get<List<string>>(BaseKeyTracker);
-				if (keys is null || !keys.Any()) return;
-				foreach (var key in keys)
-				{
-					_memoryCache.Remove(key);
-				}
+				MemoryPurge();
 				break;
 			default:
 				break;
 		}
 	}
-
-	#region IDistributedCache
-	byte[]? IDistributedCache.Get(string key)
-	{
-		T? found = Get(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	async Task<byte[]?> IDistributedCache.GetAsync(string key, CancellationToken token)
-	{
-		T? found = await GetAsync(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	void IDistributedCache.Set(string key, byte[] value, DistributedCacheEntryOptions options)
-	{
-		Add(Deserialize<T>(value));
-	}
-	async Task IDistributedCache.SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token)
-	{
-		await AddAsync(Deserialize<T>(value));
-	}
-	void IDistributedCache.Refresh(string key) => throw new NotImplementedException();
-	Task IDistributedCache.RefreshAsync(string key, CancellationToken token) => throw new NotImplementedException();
-	void IDistributedCache.Remove(string key)
-	{
-		Remove(key);
-	}
-	async Task IDistributedCache.RemoveAsync(string key, CancellationToken token)
-	{
-		await RemoveAsync(key);
-	}
-	#endregion
 }

@@ -1,5 +1,4 @@
 ﻿using System.Linq.Expressions;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -16,7 +15,7 @@ public static class ServiceCollectionExtensions
 	/// <returns></returns>
 	public static IServiceCollection AddDistributedRepository<T>(this IServiceCollection services, Func<T, string> keySelector, string? keyPrefix = null) where T : class
 	{
-		services.AddScoped<IDistributedRepository<T>>((provider) =>
+		services.AddSingleton<IDistributedRepository<T>>((provider) =>
 		{
 			IConnectionMultiplexer redis = provider.GetRequiredService<IConnectionMultiplexer>();
 			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
@@ -35,9 +34,9 @@ public static class ServiceCollectionExtensions
 	/// <param name="services"></param>
 	/// <param name="keySelector"></param>
 	/// <returns></returns>
-	public static IServiceCollection AddDistributedBackedRepository<T>(this IServiceCollection services, Func<T, string> keySelector, string keyPrefix) where T : class
+	public static IServiceCollection AddDistributedBackedRepository<T>(this IServiceCollection services, Func<T, string> keySelector, string? keyPrefix = null) where T : class
 	{
-		services.AddScoped<IDistributedRepository<T>>((provider) =>
+		services.AddSingleton<IDistributedRepository<T>>((provider) =>
 		{
 			IConnectionMultiplexer redis = provider.GetRequiredService<IConnectionMultiplexer>();
 			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
@@ -64,17 +63,6 @@ public static class ServiceCollectionExtensions
 		{
 			RedisIndexer<T>.ValidateIndexerExpression(expression);
 			return new RedisIndexer<T>(IndexingExtensions.ExtractPropertyName(expression), expression);
-		});
-		return services;
-	}
-
-	public static IServiceCollection AddDistributedCache<T>(this IServiceCollection services, Func<T, string> keySelector, string keyPrefix) where T : class
-	{
-		services.AddScoped<IDistributedCache>((provider) =>
-		{
-			IConnectionMultiplexer redis = provider.GetRequiredService<IConnectionMultiplexer>();
-			IMemoryCache memoryCache = provider.GetRequiredService<IMemoryCache>();
-			return new DistributedBackedRepository<T>(redis, memoryCache, keySelector, keyPrefix: keyPrefix);
 		});
 		return services;
 	}

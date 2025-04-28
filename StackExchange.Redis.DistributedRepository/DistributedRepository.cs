@@ -2,18 +2,16 @@
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis.DistributedRepository.Indexing;
 using StackExchange.Redis.DistributedRepository.Models;
 using StackExchange.Redis.DistributedRepository.Telemetry;
-using static StackExchange.Redis.DistributedRepository.Extensions.BinarySerializer;
 using static StackExchange.Redis.DistributedRepository.Extensions.RepositoryExtensions;
 
 [assembly: InternalsVisibleTo("StackExchange.Redis.DistributedRepository.Banchmark")]
 namespace StackExchange.Redis.DistributedRepository;
 
-public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, IDistributedRepository<T> where T : class
+public class DistributedRepository<T> : RepositoryBase<T>, IDistributedRepository<T> where T : class
 {
 	protected static string _instanceId = Guid.NewGuid().ToString();
 
@@ -67,7 +65,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	}
 
 	#region add
-	public T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
+	public virtual T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
 	public virtual async Task<T> AddAsync(T item)
 	{
@@ -120,8 +118,8 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 				string key = KeySelector.Invoke(item);
 				transaction.HashSetAsync(BaseKey, key, JsonSerializer.Serialize(item));
 				transaction.SetAddAsync(BaseKeyTracker, key);
-				IndexRangeRedis(ref transaction, range);
 			}
+			IndexRangeRedis(ref transaction, range);
 			await transaction.ExecuteAsync();
 		}
 		catch (Exception ex)
@@ -266,14 +264,11 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_database.HashExists(BaseKey, Key))
-			{
-				string? value = _database.HashGet(BaseKey, Key);
-				if (string.IsNullOrEmpty(value))
-					return null;
-				T? item = JsonSerializer.Deserialize<T?>(value);
-				return item;
-			}
+			string? value = _database.HashGet(BaseKey, Key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			T? item = JsonSerializer.Deserialize<T?>(value);
+			return item;
 		}
 		catch (Exception ex)
 		{
@@ -307,14 +302,11 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_database.HashExists(BaseKey, Key))
-			{
-				string? value = await _database.HashGetAsync(BaseKey, Key);
-				if (string.IsNullOrEmpty(value))
-					return null;
-				T? item = JsonSerializer.Deserialize<T>(value);
-				return item;
-			}
+			string? value = await _database.HashGetAsync(BaseKey, Key);
+			if (string.IsNullOrEmpty(value))
+				return null;
+			T? item = JsonSerializer.Deserialize<T>(value);
+			return item;
 		}
 		catch (Exception ex)
 		{
@@ -344,21 +336,52 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 	/// <inheritdoc/>
 	public virtual async Task<IEnumerable<T>> GetAsync()
 	{
-		HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
 
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+			HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
 
-		return values.Where(x => x.Value is not null).Select(x => x.Value);
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	/// <inheritdoc/>
 	public virtual IEnumerable<T> Get()
 	{
-		HashEntry[]? objects = _database.HashGetAll(BaseKey);
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+			HashEntry[]? objects = _database.HashGetAll(BaseKey);
 
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
 
-		return values.Where(x => x.Value is not null).Select(x => x.Value);
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	public virtual async Task<IEnumerable<T>> WhereAsync(Expression<Func<T, bool>> predicate)
@@ -503,39 +526,4 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedCache, ID
 
 	protected string IndexKey(string name, object value) =>
 		$"{IndexBaseKey}:{name}:{IndexKeyHelper.NormalizeValue(value)}";
-
-	#region IDistributedCache
-	byte[]? IDistributedCache.Get(string key)
-	{
-		T? found = Get(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	async Task<byte[]?> IDistributedCache.GetAsync(string key, CancellationToken token)
-	{
-		T? found = await GetAsync(key);
-		if (found is null)
-			return null;
-		return Serialize(found);
-	}
-	void IDistributedCache.Set(string key, byte[] value, DistributedCacheEntryOptions options)
-	{
-		Add(Deserialize<T>(value));
-	}
-	async Task IDistributedCache.SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token)
-	{
-		await AddAsync(Deserialize<T>(value));
-	}
-	void IDistributedCache.Refresh(string key) => throw new NotImplementedException();
-	Task IDistributedCache.RefreshAsync(string key, CancellationToken token) => throw new NotImplementedException();
-	void IDistributedCache.Remove(string key)
-	{
-		Remove(key);
-	}
-	async Task IDistributedCache.RemoveAsync(string key, CancellationToken token)
-	{
-		await RemoveAsync(key);
-	}
-	#endregion
 }
