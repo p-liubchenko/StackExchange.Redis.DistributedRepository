@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Distributed;
@@ -53,11 +54,9 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 		try
 		{
-
-			string fqk = this.FQK(key);
 			T result = await AddRedis(key, item);
-			MemoryAdd(item, fqk);
-			_bus.Publish(_busChannel, GenerateMessage(MessageType.Created, key));
+			MemoryAdd(item);
+			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Created, key));
 			return result;
 		}
 		catch (Exception ex)
@@ -97,18 +96,17 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		}
 	}
 
-	protected void MemoryAdd(T? item, string fqk)
+	protected void MemoryAdd(T? item)
 	{
 		if (item is null)
 			return;
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
 		if (items is null)
 		{
-			items = new List<T>();
+			items = new ConcurrentDictionary<string, T>();
 			_memoryCache.Set(MemoryListKey, items);
 		}
-		items.Add(item);
-		_memoryCache.Set(fqk, item);
+		items[KeySelector.Invoke(item)] = item;
 
 	}
 	#endregion
@@ -141,12 +139,10 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 	protected void RemoveMemory(string key)
 	{
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
 		if (items is null)
 			return;
-		items.RemoveAll(x => KeySelector.Invoke(x) == key);
-
-		_memoryCache.Remove(this.FQK(key));
+		items.Remove(key, out _);
 	}
 	#endregion
 
@@ -157,9 +153,13 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(this.FQK(Key), out T? item))
+			if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
 			{
-				return item;
+				if (items is null)
+					return null;
+
+				if (items.TryGetValue(Key, out T? item))
+					return item;
 			}
 
 			if (_database.HashExists(BaseKey, Key))
@@ -167,7 +167,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 				string? value = _database.HashGet(BaseKey, Key);
 				if (string.IsNullOrEmpty(value))
 					return null;
-				item = JsonSerializer.Deserialize<T?>(value);
+				T item = JsonSerializer.Deserialize<T?>(value);
 				_memoryCache.Set(this.FQK(Key), item);
 				return item;
 			}
@@ -206,16 +206,19 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(this.FQK(key), out T? item))
+			if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
 			{
-				return item;
+				if (items is null)
+					return null;
+				if (items.TryGetValue(key, out T? itemMemory))
+					return itemMemory;
 			}
 
 			string? value = await _database.HashGetAsync(BaseKey, key);
 			if (string.IsNullOrEmpty(value))
 				return null;
-			item = JsonSerializer.Deserialize<T>(value);
-			_memoryCache.Set(this.FQK(key), item);
+			T? item = JsonSerializer.Deserialize<T>(value);
+			MemoryAdd(item);
 			return item;
 
 		}
@@ -276,7 +279,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	/// <inheritdoc/>
 	public new IEnumerable<T> Get()
 	{
-		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
+		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
 		if (!fetchedFromMemory || items is null)
 		{
 			HashEntry[]? objects = _database.HashGetAll(BaseKey);
@@ -285,20 +288,26 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 			_memoryCache.Set(
 				MemoryListKey,
-				values.Values.ToList()
+				new ConcurrentDictionary<string, T>(values.Values.Where(x => x is not null).ToDictionary(x => KeySelector.Invoke(x!), x => x))
 			);
 
-			foreach (KeyValuePair<string, T?> item in values)
-			{
-				if (item.Value is null)
-					continue;
-
-				_memoryCache.Set(this.FQK(item.Key), item.Value);
-			}
 			return values.Where(x => x.Value is not null).Select(x => x.Value);
 		}
 
-		return items;
+		return Enumerable.Empty<T>();
+	}
+
+	protected bool MemoryTryGet(string key, T? item = null)
+	{
+		if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
+		{
+			if (items is null)
+				return false;
+
+			if (items.TryGetValue(key, out item))
+				return true;
+		}
+		return false;
 	}
 
 	/// <inheritdoc/>
@@ -313,7 +322,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 			foreach (var item in keys)
 			{
-				MemoryAdd(await GetAsync(item), this.FQK(item.ToString()));
+				MemoryAdd(await GetAsync(item));
 			}
 		}
 		catch (Exception ex)
@@ -392,7 +401,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 			foreach (RedisValue key in keys)
 			{
-				MemoryAdd(await GetAsync(key), this.FQK(key.ToString()));
+				MemoryAdd(await GetAsync(key));
 			}
 		}
 		catch (Exception ex)
@@ -421,16 +430,16 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 			case MessageType.Created:
 				if (string.IsNullOrEmpty(message.item))
 					return;
-				T? item = Get(message.item);
-				if (item is null) return;
-				MemoryAdd(item, this.FQK(message.item));
+				T? created = Get(message.item);
+				if (created is null) return;
+				MemoryAdd(created);
 				break;
 			case MessageType.Updated:
 				if (string.IsNullOrEmpty(message.item))
 					return;
-				T? item2 = Get(message.item);
-				if (item2 is null) return;
-				_memoryCache.Set(this.FQK(message.item), item2);
+				T? updated = Get(message.item);
+				if (updated is null) return;
+				MemoryAdd(updated);
 				break;
 			case MessageType.Deleted:
 				if (string.IsNullOrEmpty(message.item))
