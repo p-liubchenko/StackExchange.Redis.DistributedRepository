@@ -134,7 +134,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T>, IDistrib
 		var poped = await GetAsync(key);
 		if (poped is null)
 			return null;
-		await RemoveRedis(key);
+		await RemoveRedis(poped);
 		RemoveMemory(key);
 		_bus.Publish(_busChannel, GenerateMessage(MessageType.Deleted, key));
 		return poped;
