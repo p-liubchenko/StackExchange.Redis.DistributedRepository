@@ -34,7 +34,7 @@ public static class ServiceCollectionExtensions
 	/// <param name="services"></param>
 	/// <param name="keySelector"></param>
 	/// <returns></returns>
-	public static IServiceCollection AddDistributedBackedRepository<T>(this IServiceCollection services, Func<T, string> keySelector, string keyPrefix) where T : class
+	public static IServiceCollection AddDistributedBackedRepository<T>(this IServiceCollection services, Func<T, string> keySelector, string? keyPrefix = null) where T : class
 	{
 		services.AddSingleton<IDistributedRepository<T>>((provider) =>
 		{

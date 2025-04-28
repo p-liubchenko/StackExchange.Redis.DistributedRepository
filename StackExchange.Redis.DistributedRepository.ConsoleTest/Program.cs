@@ -94,7 +94,7 @@ internal class Program
 			if (string.IsNullOrEmpty(redis_cs)) throw new Exception("Redis connection string should not be null");
 			return ConnectionMultiplexer.Connect(redis_cs);
 		});
-		services.AddDistributedRepository<TestObjectModel>((x) => x.Id.ToString());
+		services.AddDistributedBackedRepository<TestObjectModel>((x) => x.Id.ToString());
 		services.AddIndexer<TestObjectModel>(x => x.Name);
 		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Year);
 		services.AddIndexer<TestObjectModel>(x => x.Created.Date.Month);

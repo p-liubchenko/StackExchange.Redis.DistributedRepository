@@ -65,7 +65,7 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedRepositor
 	}
 
 	#region add
-	public T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
+	public virtual T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
 	public virtual async Task<T> AddAsync(T item)
 	{
@@ -336,21 +336,52 @@ public class DistributedRepository<T> : RepositoryBase<T>, IDistributedRepositor
 	/// <inheritdoc/>
 	public virtual async Task<IEnumerable<T>> GetAsync()
 	{
-		HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
 
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+			HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
 
-		return values.Where(x => x.Value is not null).Select(x => x.Value);
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	/// <inheritdoc/>
 	public virtual IEnumerable<T> Get()
 	{
-		HashEntry[]? objects = _database.HashGetAll(BaseKey);
+		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get");
+		Stopwatch? sw = Stopwatch.StartNew();
+		try
+		{
+			HashEntry[]? objects = _database.HashGetAll(BaseKey);
 
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
 
-		return values.Where(x => x.Value is not null).Select(x => x.Value);
+			return values.Where(x => x.Value is not null).Select(x => x.Value);
+		}
+		catch (Exception ex)
+		{
+			_logger?.LogError(ex, "Error getting item from repository");
+			throw;
+		}
+		finally
+		{
+			_metrics?.ObserveDuration("repo.get", sw.Elapsed);
+			activity?.Stop();
+		}
 	}
 
 	public virtual async Task<IEnumerable<T>> WhereAsync(Expression<Func<T, bool>> predicate)

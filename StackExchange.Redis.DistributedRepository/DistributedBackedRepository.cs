@@ -41,9 +41,9 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	#region add
-	public new T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
+	public override T Add(T item) => AddAsync(item).GetAwaiter().GetResult();
 
-	public new async Task<T> AddAsync(T item)
+	public override async Task<T> AddAsync(T item)
 	{
 		ArgumentNullException.ThrowIfNull(item);
 		string key = KeySelector.Invoke(item);
@@ -76,7 +76,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	public new void AddRange(IEnumerable<T> range) =>
 		AddRangeAsync(range).GetAwaiter().GetResult();
 
-	public new async Task AddRangeAsync(IEnumerable<T> range)
+	public override async Task AddRangeAsync(IEnumerable<T> range)
 	{
 		await RedisAddRange(range);
 		MemoryAddRange(range);
@@ -100,21 +100,21 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	#endregion
 
 	#region remove
-	public new T? Remove(T item)
+	public override T? Remove(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return Remove(key);
 	}
 
-	public new async Task<T?> RemoveAsync(T item)
+	public override async Task<T?> RemoveAsync(T item)
 	{
 		string? key = KeySelector.Invoke(item);
 		return await RemoveAsync(key);
 	}
 
-	public new T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
+	public override T? Remove(string key) => RemoveAsync(key).GetAwaiter().GetResult();
 
-	public new async Task<T?> RemoveAsync(string key)
+	public override async Task<T?> RemoveAsync(string key)
 	{
 		var poped = await GetAsync(key);
 		if (poped is null)
@@ -132,7 +132,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	#endregion
 
 	/// <inheritdoc/>
-	public new T? Get(string Key)
+	public override T? Get(string Key)
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.get", key: Key);
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -166,7 +166,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new T GetOrAdd(string key, Func<T> factory)
+	public override T GetOrAdd(string key, Func<T> factory)
 	{
 		T? item = Get(key);
 		if (item is not null)
@@ -177,7 +177,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new async Task<T?> GetAsync(string? key)
+	public override async Task<T?> GetAsync(string? key)
 	{
 		if (key is null)
 			return null;
@@ -211,7 +211,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
+	public override async Task<T> GetOrAddAsync(string key, Func<Task<T>> factory)
 	{
 		T? item = await GetAsync(key);
 		if (item is not null)
@@ -222,39 +222,33 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new async Task<IEnumerable<T>?> GetAsync()
+	public override async Task<IEnumerable<T>> GetAsync()
 	{
 		if (_memDict.Values.Any())
 		{
 			return _memDict.Values;
 		}
-		HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
+		IEnumerable<T>? values = await base.GetAsync();
 
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+		MemoryAddRange(values);
 
-		MemoryAddRange(values.Values.Where(x => x is not null));
-
-		IEnumerable<T>? result = values.Select(x => x.Value).Where(x => x is not null);
-
-		return result;
+		return values;
 	}
 
 	/// <inheritdoc/>
-	public new IEnumerable<T> Get()
+	public override IEnumerable<T> Get()
 	{
 		if (_memDict.Values.Any())
 			return _memDict.Values;
 
-		HashEntry[]? objects = _database.HashGetAll(BaseKey);
-
-		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+		IEnumerable<T> values = base.Get();
 
 		_memoryCache.Set(
 			MemoryListKey,
-			new ConcurrentDictionary<string, T>(values.Values.Where(x => x is not null).ToDictionary(x => KeySelector.Invoke(x!), x => x))
+			new ConcurrentDictionary<string, T>(values.ToDictionary(x => KeySelector.Invoke(x!), x => x))
 		);
 
-		return values.Values.Where(x => x is not null)?? Enumerable.Empty<T>();
+		return values.Where(x => x is not null)?? Enumerable.Empty<T>();
 
 	}
 
@@ -291,7 +285,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new async Task Purge()
+	public override async Task Purge()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.purge");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -320,7 +314,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	/// <inheritdoc/>
-	public new async Task Rebuild()
+	public override async Task Rebuild()
 	{
 		using Activity? activity = ActivitySourceProvider.StartActivity("repo.rebuild");
 		Stopwatch? sw = Stopwatch.StartNew();
@@ -355,7 +349,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		}
 	}
 
-	protected new virtual void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
+	protected override void ItemUpdatedHandler(RedisChannel channel, RedisValue value)
 	{
 		Message? message = JsonSerializer.Deserialize<Message>(value.ToString());
 
