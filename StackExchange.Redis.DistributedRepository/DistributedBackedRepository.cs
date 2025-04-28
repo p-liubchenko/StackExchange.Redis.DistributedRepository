@@ -23,6 +23,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	}
 
 	private readonly IMemoryCache _memoryCache;
+	private readonly ConcurrentDictionary<string, T> _memDict = new();
 
 	public DistributedBackedRepository(
 		IConnectionMultiplexer redis,
@@ -35,6 +36,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	{
 
 		_memoryCache = memoryCache;
+		_memoryCache.Set(MemoryListKey, _memDict);
 		Task.Run(RebakeAll).ConfigureAwait(true);
 	}
 
@@ -82,17 +84,9 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 	protected void MemoryAddRange(IEnumerable<T> range)
 	{
-		_memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (items is null)
-		{
-			items = new List<T>();
-			_memoryCache.Set(MemoryListKey, items);
-		}
-		items.AddRange(range);
 		foreach (var item in range)
 		{
-			string key = KeySelector.Invoke(item);
-			_memoryCache.Set(this.FQK(key), item);
+			_memDict[KeySelector.Invoke(item)] = item;
 		}
 	}
 
@@ -100,14 +94,8 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	{
 		if (item is null)
 			return;
-		_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
-		if (items is null)
-		{
-			items = new ConcurrentDictionary<string, T>();
-			_memoryCache.Set(MemoryListKey, items);
-		}
-		items[KeySelector.Invoke(item)] = item;
 
+		_memDict[KeySelector.Invoke(item)] = item;
 	}
 	#endregion
 
@@ -139,10 +127,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 	protected void RemoveMemory(string key)
 	{
-		_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
-		if (items is null)
-			return;
-		items.Remove(key, out _);
+		_memDict.Remove(key, out _);
 	}
 	#endregion
 
@@ -153,14 +138,8 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
-			{
-				if (items is null)
-					return null;
-
-				if (items.TryGetValue(Key, out T? item))
-					return item;
-			}
+			if (_memDict.TryGetValue(Key, out T? itemMemory))
+				return itemMemory;
 
 			if (_database.HashExists(BaseKey, Key))
 			{
@@ -168,7 +147,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 				if (string.IsNullOrEmpty(value))
 					return null;
 				T item = JsonSerializer.Deserialize<T?>(value);
-				_memoryCache.Set(this.FQK(Key), item);
+				MemoryAdd(item);
 				return item;
 			}
 		}
@@ -206,13 +185,8 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
-			{
-				if (items is null)
-					return null;
-				if (items.TryGetValue(key, out T? itemMemory))
-					return itemMemory;
-			}
+			if (_memDict.TryGetValue(key, out T? itemMemory))
+				return itemMemory;
 
 			string? value = await _database.HashGetAsync(BaseKey, key);
 			if (string.IsNullOrEmpty(value))
@@ -250,64 +224,43 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 	/// <inheritdoc/>
 	public new async Task<IEnumerable<T>?> GetAsync()
 	{
-		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out List<T>? items);
-		if (!fetchedFromMemory || items is null)
+		if (_memDict.Values.Any())
 		{
-			HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
-
-			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
-
-			_memoryCache.Set(
-				MemoryListKey,
-				values.Values.ToList()
-			);
-
-			foreach (KeyValuePair<string, T?> item in values)
-			{
-				if (item.Value is null)
-					continue;
-
-				_memoryCache.Set(this.FQK(item.Key), item.Value);
-			}
-			IEnumerable<T>? result = values.Select(x => x.Value).Where(x => x is not null);
-			return result;
+			return _memDict.Values;
 		}
+		HashEntry[]? objects = await _database.HashGetAllAsync(BaseKey);
 
-		return items;
+		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+
+		MemoryAddRange(values.Values.Where(x => x is not null));
+
+		IEnumerable<T>? result = values.Select(x => x.Value).Where(x => x is not null);
+
+		return result;
 	}
 
 	/// <inheritdoc/>
 	public new IEnumerable<T> Get()
 	{
-		bool fetchedFromMemory = _memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items);
-		if (!fetchedFromMemory || items is null)
-		{
-			HashEntry[]? objects = _database.HashGetAll(BaseKey);
+		if (_memDict.Values.Any())
+			return _memDict.Values;
 
-			IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
+		HashEntry[]? objects = _database.HashGetAll(BaseKey);
 
-			_memoryCache.Set(
-				MemoryListKey,
-				new ConcurrentDictionary<string, T>(values.Values.Where(x => x is not null).ToDictionary(x => KeySelector.Invoke(x!), x => x))
-			);
+		IDictionary<string, T?> values = objects.ToDictionary(x => x.Name.ToString(), x => JsonSerializer.Deserialize<T>(x.Value));
 
-			return values.Where(x => x.Value is not null).Select(x => x.Value);
-		}
+		_memoryCache.Set(
+			MemoryListKey,
+			new ConcurrentDictionary<string, T>(values.Values.Where(x => x is not null).ToDictionary(x => KeySelector.Invoke(x!), x => x))
+		);
 
-		return Enumerable.Empty<T>();
+		return values.Values.Where(x => x is not null)?? Enumerable.Empty<T>();
+
 	}
 
 	protected bool MemoryTryGet(string key, T? item = null)
 	{
-		if (_memoryCache.TryGetValue(MemoryListKey, out ConcurrentDictionary<string, T>? items))
-		{
-			if (items is null)
-				return false;
-
-			if (items.TryGetValue(key, out item))
-				return true;
-		}
-		return false;
+		return _memDict.TryGetValue(key, out item);
 	}
 
 	/// <inheritdoc/>
@@ -344,10 +297,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 		Stopwatch? sw = Stopwatch.StartNew();
 		try
 		{
-			ITransaction transaction = _database.CreateTransaction();
-			transaction.KeyDeleteAsync(BaseKey);
-			transaction.KeyDeleteAsync(BaseKeyTracker);
-			await transaction.ExecuteAsync();
+			await base.Purge();
 			await _bus.PublishAsync(_busChannel, GenerateMessage(MessageType.Purged, null));
 			MemoryPurge();
 			await RebakeAll();
@@ -366,18 +316,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 
 	public void MemoryPurge()
 	{
-		List<T>? items = _memoryCache.Get<List<T>>(MemoryListKey);
-		if (items is null)
-			return;
-		foreach (var item in items)
-		{
-			_memoryCache.Remove(this.FQK(KeySelector.Invoke(item)));
-		}
-
-		_memoryCache.Set(
-			MemoryListKey,
-			new List<T>()
-		);
+		_memDict.Clear();
 	}
 
 	/// <inheritdoc/>
@@ -447,12 +386,7 @@ public class DistributedBackedRepository<T> : DistributedRepository<T> where T :
 				RemoveMemory(message.item);
 				break;
 			case MessageType.Purged:
-				List<string>? keys = _memoryCache.Get<List<string>>(BaseKeyTracker);
-				if (keys is null || !keys.Any()) return;
-				foreach (var key in keys)
-				{
-					_memoryCache.Remove(key);
-				}
+				MemoryPurge();
 				break;
 			default:
 				break;
